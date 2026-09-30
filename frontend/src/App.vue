@@ -3,7 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { Bell, CalendarDays, Camera, CameraOff, Check, ChevronDown, CircleAlert, CircleCheck, Download, Eye, LayoutDashboard, LogOut, Plus, QrCode, RefreshCw, Search, Settings, ShieldCheck, Sparkles, UserRound, Users, X } from '@lucide/vue'
 import QrScanner from 'qr-scanner'
 
-const API = import.meta.env.VITE_API_URL || `http://${window.location.hostname}:18081/api`
+const API = import.meta.env.VITE_API_URL || (window.location.port === '5173' || window.location.port === '18082' ? `http://${window.location.hostname}:18081/api` : `${window.location.origin}/api`)
 const token = ref(localStorage.getItem('gatherly_token') || '')
 const user = ref(JSON.parse(localStorage.getItem('gatherly_user') || 'null'))
 const loading = ref(false)

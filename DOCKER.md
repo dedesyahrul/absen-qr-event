@@ -2,8 +2,8 @@
 
 ## Prasyarat
 
-- Docker Desktop terinstal dan running
-- Port 18081, 18082, 55432 tersedia
+- Docker & Docker Compose terinstal dan running
+- Port 80, 443, 18081, 18082, 55432 tersedia
 
 ---
 
@@ -19,13 +19,18 @@ docker compose up -d --build
 
 Tunggu hingga semua container running, lalu buka:
 
-| Service  | URL                          |
-|----------|------------------------------|
-| Frontend | http://localhost:18082        |
-| API      | http://localhost:18081/api    |
-| API Docs | http://localhost:18081/docs   |
+| Akses       | URL                                  | Keterangan                      |
+|-------------|--------------------------------------|---------------------------------|
+| HTTPS (HP)  | https://IP_VPS                       | Untuk scan QR via kamera HP     |
+| Frontend    | http://localhost:18082               | Dev langsung tanpa Nginx        |
+| API         | http://localhost:18081/api           | Dev langsung tanpa Nginx        |
+| API Docs    | https://IP_VPS/docs                  | Swagger via Nginx               |
 
 Login: `admin@example.com` / `admin123`
+
+> **Penting:** Akses dari HP harus via **HTTPS** agar kamera bisa digunakan.
+> Browser akan tampilkan warning "Not Secure" karena self-signed certificate.
+> Klik **Advanced** > **Proceed** untuk melanjutkan.
 
 ---
 
@@ -54,6 +59,7 @@ docker compose restart
 ```bash
 docker compose restart backend
 docker compose restart frontend
+docker compose restart nginx
 docker compose restart db
 ```
 
@@ -72,6 +78,7 @@ docker compose logs -f
 # Satu service saja
 docker compose logs -f backend
 docker compose logs -f frontend
+docker compose logs -f nginx
 docker compose logs -f db
 
 # 50 baris terakhir
@@ -137,7 +144,7 @@ docker compose down
 docker compose down -v
 ```
 
-> **Peringatan:** flag `-v` menghapus volume `postgres_data` dan `frontend_modules`. Semua data peserta, event, dan attendance akan hilang.
+> **Peringatan:** flag `-v` menghapus volume `postgres_data`, `frontend_modules`, dan `nginx_certs`. Semua data peserta, event, attendance, dan SSL certificate akan hilang (certificate akan di-generate ulang saat start).
 
 ### Rebuild dari nol (fresh start)
 
@@ -169,36 +176,50 @@ docker system prune -a --volumes
 
 ---
 
-## Akses dari HP (Jaringan LAN)
+## Akses dari HP / Device Lain
 
-### 1. Cek IP komputer
+### Via VPS (production)
 
-```powershell
+Cukup buka dari browser HP:
+
+```
+https://IP_VPS
+```
+
+- SSL certificate otomatis di-generate saat pertama kali start
+- Browser akan tampilkan warning karena self-signed cert -> klik **Advanced** > **Proceed**
+- Setelah accept, kamera dan semua fitur akan berfungsi normal
+
+### Via jaringan lokal (development)
+
+#### 1. Cek IP komputer
+
+```bash
+# Linux/Mac
+ip addr show | grep inet
+
+# Windows
 ipconfig
 ```
 
-Cari alamat IPv4 di adapter Wi-Fi (contoh: `10.68.61.148`).
-
-### 2. Buka firewall (PowerShell as Administrator)
+#### 2. Buka firewall (Windows - PowerShell as Administrator)
 
 ```powershell
-netsh advfirewall firewall add rule name="Gatherly Backend 18081" dir=in action=allow protocol=TCP localport=18081
-netsh advfirewall firewall add rule name="Gatherly Frontend 18082" dir=in action=allow protocol=TCP localport=18082
+netsh advfirewall firewall add rule name="Gatherly HTTPS 443" dir=in action=allow protocol=TCP localport=443
+netsh advfirewall firewall add rule name="Gatherly HTTP 80" dir=in action=allow protocol=TCP localport=80
 ```
 
-### 3. Buka dari browser HP
+#### 3. Buka dari browser HP
 
 ```
-http://<IP_KOMPUTER>:18082
+https://<IP_KOMPUTER>
 ```
 
-Contoh: `http://10.68.61.148:18082`
-
-### Hapus firewall rule (jika sudah tidak dibutuhkan)
+#### Hapus firewall rule (jika sudah tidak dibutuhkan)
 
 ```powershell
-netsh advfirewall firewall delete rule name="Gatherly Backend 18081"
-netsh advfirewall firewall delete rule name="Gatherly Frontend 18082"
+netsh advfirewall firewall delete rule name="Gatherly HTTPS 443"
+netsh advfirewall firewall delete rule name="Gatherly HTTP 80"
 ```
 
 ---
@@ -209,7 +230,18 @@ netsh advfirewall firewall delete rule name="Gatherly Frontend 18082"
 docker compose
 ├── db        - PostgreSQL 16 (port 55432)
 ├── backend   - FastAPI + Uvicorn (port 18081)
-└── frontend  - Vue 3 + Vite dev server (port 18082)
+├── frontend  - Vue 3 + Vite dev server (port 18082)
+└── nginx     - Reverse proxy + SSL (port 80/443)
+```
+
+```
+Browser (HP)
+    │
+    ▼ HTTPS :443
+  Nginx (SSL termination)
+    ├──── /        → frontend:5173
+    ├──── /api     → backend:8000
+    └──── /docs    → backend:8000
 ```
 
 ### Environment Variables (.env)
@@ -222,6 +254,31 @@ docker compose
 | POSTGRES_PORT     | 55432               | Port PostgreSQL       |
 | BACKEND_PORT      | 18081               | Port API backend      |
 | FRONTEND_PORT     | 18082               | Port frontend         |
+| HTTPS_PORT        | 443                 | Port HTTPS (Nginx)    |
+| HTTP_PORT         | 80                  | Port HTTP (redirect)  |
+
+---
+
+## SSL Certificate
+
+### Self-signed (default)
+
+Certificate otomatis di-generate saat container `nginx` pertama kali start. Tersimpan di volume `nginx_certs` dan berlaku 10 tahun.
+
+### Regenerate certificate
+
+```bash
+# Hapus volume cert lama
+docker compose down
+docker volume rm absen-qr-event_nginx_certs
+
+# Start ulang (cert baru akan di-generate)
+docker compose up -d
+```
+
+### Ganti ke Let's Encrypt (jika punya domain)
+
+Jika nantinya sudah punya domain, ganti isi `nginx/default.conf` dan gunakan certbot untuk generate SSL certificate yang trusted.
 
 ---
 
@@ -233,6 +290,7 @@ docker compose
 # Cek log error
 docker compose logs backend
 docker compose logs frontend
+docker compose logs nginx
 
 # Rebuild clean
 docker compose down -v
@@ -260,11 +318,19 @@ docker volume rm absen-qr-event_frontend_modules
 docker compose up -d --build
 ```
 
+### Kamera tidak bisa diakses dari HP
+
+1. Pastikan akses via **HTTPS** (`https://`), bukan HTTP
+2. Accept self-signed certificate warning di browser
+3. Izinkan akses kamera saat browser meminta permission
+
 ### Port sudah dipakai
 
 Edit `.env` dan ganti port yang bentrok:
 
 ```env
+HTTPS_PORT=8443
+HTTP_PORT=8080
 BACKEND_PORT=19081
 FRONTEND_PORT=19082
 ```
@@ -273,4 +339,14 @@ Lalu rebuild:
 
 ```bash
 docker compose up -d --build
+```
+
+### Nginx 502 Bad Gateway
+
+```bash
+# Pastikan backend dan frontend sudah running
+docker compose ps
+
+# Restart nginx
+docker compose restart nginx
 ```
