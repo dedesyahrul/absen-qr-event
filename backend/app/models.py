@@ -15,6 +15,7 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(20), default="staff")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class Event(Base):
@@ -28,7 +29,9 @@ class Event(Base):
     location: Mapped[str] = mapped_column(String(255), default="")
     status: Mapped[str] = mapped_column(String(20), default="active", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     participants: Mapped[list["Participant"]] = relationship(back_populates="event", cascade="all, delete-orphan")
+    tables: Mapped[list["Table"]] = relationship(back_populates="event", cascade="all, delete-orphan")
 
 
 class Vendor(Base):
@@ -40,7 +43,22 @@ class Vendor(Base):
     contact_name: Mapped[str] = mapped_column(String(120), default="")
     phone: Mapped[str] = mapped_column(String(40), default="")
     email: Mapped[str] = mapped_column(String(255), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     participants: Mapped[list["Participant"]] = relationship(back_populates="vendor", cascade="all, delete-orphan")
+
+
+class Table(Base):
+    __tablename__ = "tables"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
+    table_number: Mapped[str] = mapped_column(String(20))
+    table_label: Mapped[str] = mapped_column(String(100), default="")
+    capacity: Mapped[int] = mapped_column(Integer, default=8)
+    zone: Mapped[str] = mapped_column(String(50), default="Regular")
+    status: Mapped[str] = mapped_column(String(20), default="available")
+    event: Mapped[Event] = relationship(back_populates="tables")
+    participants: Mapped[list["Participant"]] = relationship(back_populates="table")
 
 
 class Participant(Base):
@@ -48,6 +66,8 @@ class Participant(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     event_id: Mapped[int] = mapped_column(ForeignKey("events.id", ondelete="CASCADE"), index=True)
     vendor_id: Mapped[int | None] = mapped_column(ForeignKey("vendors.id", ondelete="SET NULL"), nullable=True, index=True)
+    table_id: Mapped[int | None] = mapped_column(ForeignKey("tables.id", ondelete="SET NULL"), nullable=True, index=True)
+    seat_number: Mapped[str | None] = mapped_column(String(10), nullable=True)
     name: Mapped[str] = mapped_column(String(150), index=True)
     position: Mapped[str] = mapped_column(String(120), default="")
     phone: Mapped[str] = mapped_column(String(40), default="")
@@ -57,8 +77,14 @@ class Participant(Base):
     check_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     check_in_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
     checked_in_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    check_out_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    check_out_method: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    check_out_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     event: Mapped[Event] = relationship(back_populates="participants")
     vendor: Mapped[Vendor | None] = relationship(back_populates="participants")
+    table: Mapped[Table | None] = relationship(back_populates="participants")
 
 
 class AttendanceLog(Base):
