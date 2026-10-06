@@ -92,12 +92,37 @@ class ImportConfirmInput(BaseModel):
     rows: list[dict]
     duplicate_action: str = "skip"
 
+class UserInput(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=5, max_length=255)
+    password: str = Field(min_length=6, max_length=100)
+    role: str = "operator"
+
+class UserUpdateInput(BaseModel):
+    name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=5, max_length=255)
+    role: str = "operator"
+    is_active: bool = True
+
+class PasswordChangeInput(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=6, max_length=100)
+
+class EventCopyInput(BaseModel):
+    name: str = Field(min_length=2, max_length=180)
+    event_date: str
+    copy_vendors: bool = True
+    copy_tables: bool = True
+    copy_participants: bool = False
+    status: str = "active"
+
 class UserOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: int
     name: str
     email: str
     role: str
+    is_active: bool = True
 
 # ─── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -135,6 +160,18 @@ def current_user(credentials: HTTPAuthorizationCredentials = Depends(bearer), db
     if not user or not user.is_active:
         raise HTTPException(status_code=401, detail="User is inactive")
     return user
+
+
+ROLE_HIERARCHY = {"superadmin": 4, "admin": 3, "operator": 2, "viewer": 1}
+
+def require_role(minimum_role: str):
+    def checker(user: User = Depends(current_user)):
+        user_level = ROLE_HIERARCHY.get(user.role, 0)
+        required_level = ROLE_HIERARCHY.get(minimum_role, 0)
+        if user_level < required_level:
+            raise HTTPException(status_code=403, detail="Akses ditolak. Role tidak mencukupi.")
+        return user
+    return checker
 
 
 def generate_qr_image(token: str) -> io.BytesIO:
@@ -177,12 +214,23 @@ def _wb_to_bytes(wb: Workbook) -> io.BytesIO:
 
 # ─── Startup / Seed ────────────────────────────────────────────────────────────
 
+import time
+
 @app.on_event("startup")
 def startup() -> None:
-    init_database()
+    retries = 5
+    while retries > 0:
+        try:
+            init_database()
+            break
+        except Exception as e:
+            retries -= 1
+            print(f"Database connection failed, retrying... ({retries} left)")
+            time.sleep(3)
+            
     with SessionLocal() as db:
         if not db.scalar(select(User).where(User.email == "admin@example.com")):
-            db.add(User(name="Aditya Rahman", email="admin@example.com", password_hash=hash_password("admin123"), role="admin"))
+            db.add(User(name="Super Admin", email="admin@example.com", password_hash=hash_password("admin123"), role="superadmin"))
         event = db.scalar(select(Event).limit(1))
         if not event:
             event = Event(name="Vendor Gathering 2026", description="Annual partner gathering", event_date="2026-03-12", start_time="08:00", end_time="17:00", location="Grand Ballroom, The Langham Jakarta", status="active")
@@ -223,6 +271,76 @@ def login(payload: LoginInput, db: Session = Depends(get_db)) -> dict:
 def me(user: User = Depends(current_user)) -> User:
     return user
 
+# ─── User Management ───────────────────────────────────────────────────────────
+
+@app.get("/api/users", tags=["Users"])
+def list_users(db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> list[dict]:
+    users = db.scalars(select(User).order_by(User.name)).all()
+    return [{"id": u.id, "name": u.name, "email": u.email, "role": u.role, "is_active": u.is_active, "created_at": u.created_at} for u in users]
+
+@app.post("/api/users", tags=["Users"])
+def create_user(payload: UserInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
+    if db.scalar(select(User).where(User.email == payload.email.lower().strip())):
+        raise HTTPException(400, "Email sudah terdaftar")
+    if payload.role == "superadmin" and user.role != "superadmin":
+        raise HTTPException(403, "Hanya superadmin yang bisa membuat superadmin")
+    new_user = User(name=payload.name, email=payload.email.lower().strip(), password_hash=hash_password(payload.password), role=payload.role)
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return {"id": new_user.id, "name": new_user.name, "email": new_user.email, "role": new_user.role, "is_active": new_user.is_active}
+
+@app.put("/api/users/{user_id}", tags=["Users"])
+def update_user(user_id: int, payload: UserUpdateInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User tidak ditemukan")
+    if target.role == "superadmin" and user.role != "superadmin":
+        raise HTTPException(403, "Hanya superadmin yang bisa mengubah superadmin")
+    if payload.email.lower().strip() != target.email:
+        if db.scalar(select(User).where(User.email == payload.email.lower().strip())):
+            raise HTTPException(400, "Email sudah terdaftar")
+    target.name = payload.name
+    target.email = payload.email.lower().strip()
+    target.role = payload.role
+    target.is_active = payload.is_active
+    db.commit()
+    db.refresh(target)
+    return {"id": target.id, "name": target.name, "email": target.email, "role": target.role, "is_active": target.is_active}
+
+@app.delete("/api/users/{user_id}", tags=["Users"])
+def deactivate_user(user_id: int, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User tidak ditemukan")
+    if target.id == user.id:
+        raise HTTPException(400, "Tidak bisa menonaktifkan diri sendiri")
+    if target.role == "superadmin" and user.role != "superadmin":
+        raise HTTPException(403, "Hanya superadmin yang bisa menonaktifkan superadmin")
+    target.is_active = False
+    db.commit()
+    return {"detail": "User berhasil dinonaktifkan"}
+
+@app.put("/api/users/{user_id}/reset-password", tags=["Users"])
+def reset_user_password(user_id: int, payload: dict, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
+    target = db.get(User, user_id)
+    if not target:
+        raise HTTPException(404, "User tidak ditemukan")
+    new_pw = payload.get("new_password", "")
+    if len(new_pw) < 6:
+        raise HTTPException(400, "Password minimal 6 karakter")
+    target.password_hash = hash_password(new_pw)
+    db.commit()
+    return {"detail": "Password berhasil direset"}
+
+@app.put("/api/auth/password", tags=["Auth"])
+def change_password(payload: PasswordChangeInput, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    if not verify_password(payload.current_password, user.password_hash):
+        raise HTTPException(400, "Password lama tidak valid")
+    user.password_hash = hash_password(payload.new_password)
+    db.commit()
+    return {"detail": "Password berhasil diubah"}
+
 # ─── Events CRUD ────────────────────────────────────────────────────────────────
 
 @app.get("/api/events", tags=["Events"])
@@ -230,7 +348,7 @@ def list_events(db: Session = Depends(get_db), user: User = Depends(current_user
     return [serialize_event(e, db) for e in db.scalars(select(Event).order_by(Event.event_date.desc(), Event.id.desc())).all()]
 
 @app.post("/api/events", tags=["Events"])
-def create_event(payload: EventInput, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def create_event(payload: EventInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     event = Event(**payload.model_dump())
     db.add(event)
     db.commit()
@@ -245,7 +363,7 @@ def get_event(event_id: int, db: Session = Depends(get_db), user: User = Depends
     return serialize_event(event, db)
 
 @app.put("/api/events/{event_id}", tags=["Events"])
-def update_event(event_id: int, payload: EventInput, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def update_event(event_id: int, payload: EventInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     event = db.get(Event, event_id)
     if not event:
         raise HTTPException(404, "Event tidak ditemukan")
@@ -256,13 +374,49 @@ def update_event(event_id: int, payload: EventInput, db: Session = Depends(get_d
     return serialize_event(event, db)
 
 @app.delete("/api/events/{event_id}", tags=["Events"])
-def delete_event(event_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def delete_event(event_id: int, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     event = db.get(Event, event_id)
     if not event:
         raise HTTPException(404, "Event tidak ditemukan")
     db.delete(event)
     db.commit()
     return {"detail": "Event berhasil dihapus"}
+
+@app.post("/api/events/{event_id}/copy", tags=["Events"])
+def copy_event(event_id: int, payload: EventCopyInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
+    source = db.get(Event, event_id)
+    if not source:
+        raise HTTPException(404, "Event tidak ditemukan")
+    new_event = Event(name=payload.name, description=source.description, event_date=payload.event_date, start_time=source.start_time, end_time=source.end_time, location=source.location, status=payload.status)
+    db.add(new_event)
+    db.flush()
+    vendor_map = {}
+    if payload.copy_vendors:
+        for v in db.scalars(select(Vendor).where(Vendor.event_id == event_id)).all():
+            new_v = Vendor(event_id=new_event.id, company_name=v.company_name, category=v.category, contact_name=v.contact_name, phone=v.phone, email=v.email)
+            db.add(new_v)
+            db.flush()
+            vendor_map[v.id] = new_v.id
+    table_map = {}
+    if payload.copy_tables:
+        for t in db.scalars(select(Table).where(Table.event_id == event_id)).all():
+            new_t = Table(event_id=new_event.id, table_number=t.table_number, table_label=t.table_label, capacity=t.capacity, zone=t.zone)
+            db.add(new_t)
+            db.flush()
+            table_map[t.id] = new_t.id
+    if payload.copy_participants:
+        for p in db.scalars(select(Participant).where(Participant.event_id == event_id)).all():
+            db.add(Participant(
+                event_id=new_event.id,
+                vendor_id=vendor_map.get(p.vendor_id) if p.vendor_id else None,
+                table_id=table_map.get(p.table_id) if p.table_id else None,
+                seat_number=p.seat_number,
+                name=p.name, position=p.position, phone=p.phone, email=p.email,
+                qr_token=token_urlsafe(24),
+            ))
+    db.commit()
+    db.refresh(new_event)
+    return serialize_event(new_event, db)
 
 @app.get("/api/events/{event_id}/dashboard", tags=["Events"])
 def dashboard(event_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
@@ -279,6 +433,18 @@ def dashboard(event_id: int, db: Session = Depends(get_db), user: User = Depends
     recent = db.scalars(select(Participant).where(Participant.event_id == event_id, Participant.check_in_at.is_not(None)).order_by(Participant.check_in_at.desc()).limit(8)).all()
     return {"event": serialize_event(event, db), "summary": {"total": total, "checked_in": checked, "remaining": total - checked, "rate": round(checked / total * 100) if total else 0}, "vendors": vendors_data, "recent": [serialize_participant(p, db) for p in recent]}
 
+@app.get("/api/events/{event_id}/stats", tags=["Events"])
+def event_stats(event_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    event = db.get(Event, event_id)
+    if not event:
+        raise HTTPException(404, "Event tidak ditemukan")
+    total = db.scalar(select(func.count(Participant.id)).where(Participant.event_id == event_id)) or 0
+    checked = db.scalar(select(func.count(Participant.id)).where(Participant.event_id == event_id, Participant.check_in_at.is_not(None))) or 0
+    vendor_count = db.scalar(select(func.count(Vendor.id)).where(Vendor.event_id == event_id)) or 0
+    table_count = db.scalar(select(func.count(Table.id)).where(Table.event_id == event_id)) or 0
+    seated = db.scalar(select(func.count(Participant.id)).where(Participant.event_id == event_id, Participant.table_id.is_not(None))) or 0
+    return {"event": serialize_event(event, db), "total_participants": total, "checked_in": checked, "remaining": total - checked, "rate": round(checked / total * 100) if total else 0, "vendor_count": vendor_count, "table_count": table_count, "seated_participants": seated, "unseated_participants": total - seated}
+
 # ─── Vendors CRUD ───────────────────────────────────────────────────────────────
 
 @app.get("/api/events/{event_id}/vendors", tags=["Vendors"])
@@ -286,7 +452,7 @@ def list_vendors(event_id: int, db: Session = Depends(get_db), user: User = Depe
     return [{"id": v.id, "company_name": v.company_name, "category": v.category, "contact_name": v.contact_name, "phone": v.phone, "email": v.email, "participant_count": db.scalar(select(func.count(Participant.id)).where(Participant.vendor_id == v.id)) or 0} for v in db.scalars(select(Vendor).where(Vendor.event_id == event_id).order_by(Vendor.company_name)).all()]
 
 @app.post("/api/events/{event_id}/vendors", tags=["Vendors"])
-def create_vendor(event_id: int, payload: VendorInput, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def create_vendor(event_id: int, payload: VendorInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     if not db.get(Event, event_id):
         raise HTTPException(404, "Event tidak ditemukan")
     vendor = Vendor(event_id=event_id, **payload.model_dump())
@@ -296,7 +462,7 @@ def create_vendor(event_id: int, payload: VendorInput, db: Session = Depends(get
     return {"id": vendor.id, **payload.model_dump(), "participant_count": 0}
 
 @app.put("/api/events/{event_id}/vendors/{vendor_id}", tags=["Vendors"])
-def update_vendor(event_id: int, vendor_id: int, payload: VendorInput, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def update_vendor(event_id: int, vendor_id: int, payload: VendorInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     vendor = db.scalar(select(Vendor).where(Vendor.id == vendor_id, Vendor.event_id == event_id))
     if not vendor:
         raise HTTPException(404, "Vendor tidak ditemukan")
@@ -307,7 +473,7 @@ def update_vendor(event_id: int, vendor_id: int, payload: VendorInput, db: Sessi
     return {"id": vendor.id, **payload.model_dump(), "participant_count": db.scalar(select(func.count(Participant.id)).where(Participant.vendor_id == vendor.id)) or 0}
 
 @app.delete("/api/events/{event_id}/vendors/{vendor_id}", tags=["Vendors"])
-def delete_vendor(event_id: int, vendor_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def delete_vendor(event_id: int, vendor_id: int, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     vendor = db.scalar(select(Vendor).where(Vendor.id == vendor_id, Vendor.event_id == event_id))
     if not vendor:
         raise HTTPException(404, "Vendor tidak ditemukan")
@@ -408,7 +574,7 @@ def update_participant(event_id: int, participant_id: int, payload: ParticipantI
     return serialize_participant(p, db)
 
 @app.delete("/api/events/{event_id}/participants/{participant_id}", tags=["Participants"])
-def delete_participant(event_id: int, participant_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def delete_participant(event_id: int, participant_id: int, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     p = db.scalar(select(Participant).where(Participant.id == participant_id, Participant.event_id == event_id))
     if not p:
         raise HTTPException(404, "Peserta tidak ditemukan")
@@ -598,7 +764,7 @@ async def import_preview(event_id: int, file: UploadFile = File(...), db: Sessio
     return {"total_rows": len(rows), "errors": errors, "rows": rows, "new_vendors": sorted(new_vendors), "new_tables": sorted(new_tables)}
 
 @app.post("/api/events/{event_id}/import/confirm", tags=["Import/Export"])
-def import_confirm(event_id: int, payload: ImportConfirmInput, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+def import_confirm(event_id: int, payload: ImportConfirmInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
     event = db.get(Event, event_id)
     if not event:
         raise HTTPException(404, "Event tidak ditemukan")
