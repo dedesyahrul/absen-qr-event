@@ -11,6 +11,9 @@ const loginError = ref('')
 const loginForm = ref({ email: 'admin@example.com', password: 'admin123' })
 const activeView = ref('overview')
 const mobileMenuOpen = ref(false)
+const showNotifPanel = ref(false)
+const showProfilePanel = ref(false)
+const notifications = ref([])
 const event = ref(null)
 const dashboard = ref(null)
 const participants = ref([])
@@ -480,7 +483,34 @@ onUnmounted(() => { document.removeEventListener('click', closeExportDropdown); 
 const checkedIn = computed(() => dashboard.value?.summary?.checked_in || 0)
 const total = computed(() => dashboard.value?.summary?.total || 0)
 const lastCheckins = computed(() => dashboard.value?.recent || [])
-onMounted(() => { if (token.value) loadData() })
+const unreadNotifs = computed(() => notifications.value.filter(n => !n.read).length)
+
+async function loadNotifications() {
+  if (!event.value) return
+  try {
+    const logs = await api(`/events/${event.value.id}/attendance-logs?limit=20`)
+    notifications.value = logs.map(l => ({
+      id: l.id,
+      text: l.result === 'checked_in' ? `${l.participant_name} checked in` : l.result === 'already_checked_in' ? `${l.participant_name} already checked in` : l.result === 'invalid_token' ? 'Invalid QR scanned' : l.result === 'undo' ? `${l.participant_name} check-in undone` : `${l.participant_name || 'Unknown'} — ${l.result}`,
+      time: l.scanned_at,
+      type: l.result === 'checked_in' ? 'success' : l.result === 'invalid_token' ? 'error' : 'info',
+      by: l.scanned_by_name,
+      read: false
+    }))
+  } catch (e) { /* ignore */ }
+}
+function toggleNotif() { showProfilePanel.value = false; showNotifPanel.value = !showNotifPanel.value; if (showNotifPanel.value) loadNotifications() }
+function toggleProfile() { showNotifPanel.value = false; showProfilePanel.value = !showProfilePanel.value }
+function markAllRead() { notifications.value.forEach(n => n.read = true) }
+onMounted(() => { 
+  if (token.value) loadData() 
+  document.addEventListener('click', () => {
+    showNotifPanel.value = false
+    showProfilePanel.value = false
+    showEventSelector.value = false
+    showExportDropdown.value = false
+  })
+})
 </script>
 
 <template>
@@ -513,7 +543,7 @@ onMounted(() => { if (token.value) loadData() })
         </div>
       </div>
     <div class="user-card"><div class="avatar">{{ user?.name?.slice(0, 2).toUpperCase() }}</div><div><strong>{{ user?.name }}</strong><span>{{ user?.role }}</span></div><button @click="logout" title="Sign out"><LogOut :size="15" /></button></div></aside>
-    <main class="main-content"><header class="topbar"><button class="mobile-menu-btn" @click="mobileMenuOpen = true"><Menu :size="22" /></button><div class="mobile-brand brand">gatherly<span class="brand-dot">.</span></div><div class="top-actions"><span class="live-indicator"><i></i> System online</span><button class="icon-button"><Bell :size="19" /></button><div class="top-avatar">{{ user?.name?.slice(0, 2).toUpperCase() }}</div></div></header>
+    <main class="main-content"><header class="topbar"><button class="mobile-menu-btn" @click="mobileMenuOpen = true"><Menu :size="22" /></button><div class="mobile-brand brand">gatherly<span class="brand-dot">.</span></div><div class="top-actions"><span class="live-indicator"><i></i> System online</span><div class="dropdown-wrap"><button class="icon-button" @click.stop="toggleNotif"><Bell :size="19" /><span v-if="unreadNotifs" class="notif-badge"></span></button><div v-if="showNotifPanel" class="dropdown-menu notif-panel" @click.stop><div class="panel-header"><strong>Notifications</strong><button class="text-button" @click="markAllRead">Mark all read</button></div><div class="notif-list"><div v-if="!notifications.length" class="empty-state small">No new notifications.</div><div v-for="n in notifications" :key="n.id" :class="['notif-item', { unread: !n.read }]"><span :class="['notif-dot', n.type]"></span><div><p>{{ n.text }}</p><small>{{ new Date(n.time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }} &middot; by {{ n.by }}</small></div></div></div></div></div><div class="dropdown-wrap"><div class="top-avatar" @click.stop="toggleProfile">{{ user?.name?.slice(0, 2).toUpperCase() }}</div><div v-if="showProfilePanel" class="dropdown-menu profile-panel" @click.stop><div class="profile-header"><div class="avatar">{{ user?.name?.slice(0, 2).toUpperCase() }}</div><div class="profile-info"><strong>{{ user?.name }}</strong><span>{{ user?.email }}</span><div><span :class="roleBadgeClass(user?.role)"></span></div></div></div><div class="dropdown-divider"></div><button @click="activeView = 'settings'; showProfilePanel = false"><Key :size="15" /> Change password</button><div class="dropdown-divider"></div><button @click="logout" class="danger-text"><Power :size="15" /> Sign out</button></div></div></div></header>
       <section class="content"><div class="heading-row"><div><p class="eyebrow">{{ event?.event_date }} &middot; Event command center</p><h1>{{ activeView === 'overview' ? `${new Date().getHours() < 11 ? 'Good morning' : new Date().getHours() < 15 ? 'Good afternoon' : new Date().getHours() < 18 ? 'Good evening' : 'Good night'}, ${user?.name?.split(' ')[0]}` : activeView === 'scanner' ? 'Attendance scanner' : activeView === 'participants' ? 'Participants' : activeView === 'seating' ? 'Seating' : activeView === 'users' ? 'User management' : activeView === 'settings' ? 'Settings' : 'Vendor directory' }}<span class="wave">&#10022;</span></h1><p class="subtitle">{{ activeView === 'overview' ? 'Here is what is happening at your event today.' : activeView === 'users' ? 'Manage user accounts and roles.' : activeView === 'settings' ? 'Configure event and account settings.' : 'Everything you need to keep the room moving.' }}</p></div><button v-if="!isViewer && activeView !== 'settings' && activeView !== 'users'" class="primary-button" @click="focusScanner"><QrCode :size="18" /> Open scanner</button></div>
 
         <template v-if="activeView === 'overview'">
