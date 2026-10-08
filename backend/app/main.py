@@ -6,6 +6,8 @@ from datetime import datetime, timezone
 from secrets import token_urlsafe
 from typing import List
 
+from pathlib import Path
+
 import qrcode
 from fastapi import Depends, FastAPI, File, HTTPException, Query, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Alignment, Font, PatternFill
+from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -174,13 +177,38 @@ def require_role(minimum_role: str):
     return checker
 
 
+# QR slot inside template-card-qr.png (inner white area of the blue frame)
+_QR_TEMPLATE_PATH = Path(__file__).resolve().parent / "assets" / "template-card-qr.png"
+_QR_SLOT = (126, 329, 517, 708)  # left, top, right, bottom
+_QR_FILL = (6, 75, 152)  # Mandiri Taspen blue from template
+_QR_PADDING = 28
+
+
 def generate_qr_image(token: str) -> io.BytesIO:
-    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=10, border=4)
+    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=12, border=1)
     qr.add_data(token)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
+    qr_img = qr.make_image(fill_color=_QR_FILL, back_color="white").convert("RGBA")
+
+    if not _QR_TEMPLATE_PATH.exists():
+        buf = io.BytesIO()
+        qr_img.save(buf, format="PNG")
+        buf.seek(0)
+        return buf
+
+    card = Image.open(_QR_TEMPLATE_PATH).convert("RGBA")
+    left, top, right, bottom = _QR_SLOT
+    slot_w = right - left - (_QR_PADDING * 2)
+    slot_h = bottom - top - (_QR_PADDING * 2)
+    qr_size = min(slot_w, slot_h)
+    qr_img = qr_img.resize((qr_size, qr_size), Image.Resampling.NEAREST)
+
+    offset_x = left + _QR_PADDING + (slot_w - qr_size) // 2
+    offset_y = top + _QR_PADDING + (slot_h - qr_size) // 2
+    card.paste(qr_img, (offset_x, offset_y), qr_img)
+
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
+    card.save(buf, format="PNG")
     buf.seek(0)
     return buf
 

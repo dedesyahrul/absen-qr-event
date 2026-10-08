@@ -22,13 +22,10 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-absen}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-absen_qr}
-      CORS_ORIGINS: ${CORS_ORIGINS:-https://${DOMAIN:-regist.dedesyahrul.dev}}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://127.0.0.1:${FRONTEND_PORT:-18082},http://localhost:${FRONTEND_PORT:-18082},https://127.0.0.1:${HTTPS_PORT:-18443},https://localhost:${HTTPS_PORT:-18443}}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
-    expose:
-      - "8000"
-    networks:
-      - default
-      - public
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-18081}:8000"
     depends_on:
       db:
         condition: service_healthy
@@ -43,39 +40,26 @@ services:
       context: ./frontend
     container_name: absen-qr-frontend
     restart: unless-stopped
-    expose:
-      - "80"
-    networks:
-      - default
-      - public
+    ports:
+      - "127.0.0.1:${FRONTEND_PORT:-18082}:80"
     depends_on:
       - backend
 
   proxy:
-    profiles: ["standalone"]
-    image: caddy:2-alpine
+    image: nginx:1.27-alpine
     container_name: absen-qr-proxy
     restart: unless-stopped
     ports:
-      - "${HTTP_PORT:-80}:80"
-      - "${HTTPS_PORT:-443}:443"
-    environment:
-      DOMAIN: ${DOMAIN:?DOMAIN must be set in .env}
-      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL must be set in .env}
+      - "127.0.0.1:${HTTPS_PORT:-18443}:443"
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data
-      - caddy_config:/config
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./nginx/entrypoint.sh:/entrypoint.sh:ro
+      - nginx_certs:/etc/nginx/certs
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
     depends_on:
       - frontend
       - backend
 
 volumes:
   postgres_data:
-  caddy_data:
-  caddy_config:
-
-networks:
-  public:
-    name: ${PUBLIC_NETWORK:-public_proxy}
-    external: true
+  nginx_certs:

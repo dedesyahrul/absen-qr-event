@@ -9,11 +9,11 @@ Environment awal untuk sistem absensi QR event dengan:
 
 ## Deployment
 
-Deployment production tersedia melalui `regist.dedesyahrul.dev` dengan Docker Compose, Caddy, dan HTTPS otomatis.
+Deployment lokal memakai Docker Compose, bind ke `127.0.0.1` saja (tanpa Caddy / domain publik).
 
 Panduan lengkap ada di [`DOCKER.md`](DOCKER.md).
 
-Port internal container PostgreSQL tetap `5432`, backend `8000`, dan frontend `80`. Port tersebut hanya digunakan di jaringan internal Docker.
+Port internal container: PostgreSQL `5432`, backend `8000`, frontend `80`. Di host dipublish sebagai port non-default (`18081` / `18082`) dan hanya ke localhost.
 
 ## Menjalankan Environment
 
@@ -23,17 +23,17 @@ Port internal container PostgreSQL tetap `5432`, backend `8000`, dan frontend `8
    Copy-Item .env.example .env
    ```
 
-2. Isi `POSTGRES_PASSWORD`, `JWT_SECRET`, dan `ACME_EMAIL` pada `.env`.
+2. Isi `POSTGRES_PASSWORD` dan `JWT_SECRET` pada `.env`.
 
-3. Pastikan DNS `regist.dedesyahrul.dev` sudah mengarah ke IP server, lalu jalankan service:
+3. Jalankan service:
 
    ```powershell
    docker compose up --build
    ```
 
-4. Buka frontend pada `https://regist.dedesyahrul.dev`.
+4. Buka aplikasi pada `https://127.0.0.1:18443` (HTTPS self-signed) atau `http://127.0.0.1:18082`.
 
-5. Periksa health API pada `https://regist.dedesyahrul.dev/api/health`.
+5. Periksa health API pada `https://127.0.0.1:18443/api/health`.
 
 Untuk menjalankan di background:
 
@@ -69,6 +69,7 @@ docker compose down -v
 ├── .env.example
 └── docker-compose.yml
 ```
+
 
 ## Catatan Pengembangan
 
