@@ -9,11 +9,11 @@ Environment awal untuk sistem absensi QR event dengan:
 
 ## Deployment
 
-Deployment lokal memakai Docker Compose, bind ke `127.0.0.1` saja (tanpa Caddy / domain publik).
+Deployment production memakai Docker Compose dengan reverse proxy HTTPS. Isi domain, secret, dan akun administrator pada `.env` sebelum service dijalankan.
 
 Panduan lengkap ada di [`DOCKER.md`](DOCKER.md).
 
-Port internal container: PostgreSQL `5432`, backend `8000`, frontend `80`. Di host dipublish sebagai port non-default (`18081` / `18082`) dan hanya ke localhost.
+Port internal container: PostgreSQL `5432`, backend `8000`, frontend `80`. Backend dan frontend tidak dipublish langsung ke host. Proxy HTTPS hanya bind ke `127.0.0.1` pada port host non-default untuk diteruskan oleh reverse proxy domain Anda.
 
 ## Menjalankan Environment
 
@@ -23,7 +23,7 @@ Port internal container: PostgreSQL `5432`, backend `8000`, frontend `80`. Di ho
    Copy-Item .env.example .env
    ```
 
-2. Isi `POSTGRES_PASSWORD` dan `JWT_SECRET` pada `.env`.
+2. Isi `POSTGRES_PASSWORD`, `JWT_SECRET`, `INITIAL_ADMIN_EMAIL`, `INITIAL_ADMIN_PASSWORD`, dan `CORS_ORIGINS` pada `.env`.
 
 3. Jalankan service:
 
@@ -31,9 +31,9 @@ Port internal container: PostgreSQL `5432`, backend `8000`, frontend `80`. Di ho
    docker compose up --build
    ```
 
-4. Buka aplikasi pada `https://127.0.0.1:18443` (HTTPS self-signed) atau `http://127.0.0.1:18082`.
+4. Buka aplikasi pada domain HTTPS yang dikonfigurasi.
 
-5. Periksa health API pada `https://127.0.0.1:18443/api/health`.
+5. Periksa health API pada `https://domain-anda.com/api/health`.
 
 Untuk menjalankan di background:
 
@@ -71,13 +71,10 @@ docker compose down -v
 ```
 
 
-## Catatan Pengembangan
-
 ## Fitur yang Sudah Berfungsi
 
 - Login admin dengan JWT.
-- Seed akun development: `admin@example.com` / `admin123`.
-- Seed event, vendor, dan peserta pertama kali database dibuat.
+- Akun administrator awal dibuat satu kali dari `INITIAL_ADMIN_EMAIL` dan `INITIAL_ADMIN_PASSWORD`.
 - Dashboard event berbasis data PostgreSQL.
 - Statistik total peserta, check-in, sisa peserta, dan attendance rate.
 - Daftar vendor dan ringkasan kehadiran per vendor.

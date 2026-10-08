@@ -35,3 +35,16 @@ def init_database() -> None:
     from . import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _ensure_schema()
+
+
+def _ensure_schema() -> None:
+    """Add columns/indexes that create_all won't alter on existing tables."""
+    statements = [
+        "ALTER TABLE participants ADD COLUMN IF NOT EXISTS qr_group_token VARCHAR(100)",
+        "CREATE INDEX IF NOT EXISTS ix_participants_qr_group_token ON participants (qr_group_token)",
+        "ALTER TABLE participants ADD COLUMN IF NOT EXISTS attended_by VARCHAR(150)",
+    ]
+    with engine.begin() as connection:
+        for statement in statements:
+            connection.execute(text(statement))

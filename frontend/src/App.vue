@@ -8,8 +8,12 @@ const token = ref(localStorage.getItem('gatherly_token') || '')
 const user = ref(JSON.parse(localStorage.getItem('gatherly_user') || 'null'))
 const loading = ref(false)
 const loginError = ref('')
-const loginForm = ref({ email: 'admin@example.com', password: 'admin123' })
+const loginForm = ref({ email: '', password: '' })
 const activeView = ref('overview')
+const monitoringLastUpdated = ref(null)
+const monitoringRefreshing = ref(false)
+const monitoringHistory = ref([])
+let monitoringTimer = null
 const mobileMenuOpen = ref(false)
 const showNotifPanel = ref(false)
 const showProfilePanel = ref(false)
@@ -21,8 +25,16 @@ const vendors = ref([])
 const search = ref('')
 const scanToken = ref('')
 const scanMessage = ref(null)
+const checkinPreview = ref(null)
+const selectedDelegasiIds = ref([])
+const showWakilForm = ref(false)
+const wakilName = ref('')
+const wakilNotes = ref('')
+const wakilByParticipant = ref({})
+const checkinSubmitting = ref(false)
 const showParticipantForm = ref(false)
-const participantForm = ref({ name: '', position: '', phone: '', email: '', vendor_id: null, table_id: null, seat_number: null })
+const participantFormMode = ref('single') // 'single' | 'group'
+const participantForm = ref({ name: '', names: ['', ''], position: '', phone: '', email: '', vendor_id: null, table_id: null, seat_number: null })
 
 // QR Code viewer state
 const showQrModal = ref(false)
@@ -37,11 +49,12 @@ let qrScannerInstance = null
 
 // Edit participant state
 const showEditForm = ref(false)
-const editForm = ref({ id: null, name: '', vendor_id: null, table_id: null, seat_number: null, position: '', phone: '', email: '' })
+const editForm = ref({ id: null, is_group: false, qr_group_token: null, name: '', names: ['', ''], vendor_id: null, table_id: null, seat_number: null, position: '', phone: '', email: '' })
 
 // Delete confirmation state
 const showDeleteConfirm = ref(false)
 const deleteTarget = ref(null)
+const deleteWholeDelegasi = ref(true)
 
 // Import state
 const showImportPreview = ref(false)
@@ -113,7 +126,7 @@ async function login() {
     await loadData()
   } catch (error) { loginError.value = error.message } finally { loading.value = false }
 }
-function logout() { token.value = ''; user.value = null; localStorage.removeItem('gatherly_token'); localStorage.removeItem('gatherly_user') }
+function logout() { stopMonitoring(); token.value = ''; user.value = null; localStorage.removeItem('gatherly_token'); localStorage.removeItem('gatherly_user') }
 async function loadData() {
   loading.value = true
   try {
@@ -130,28 +143,205 @@ async function refreshEventData() {
   if (!event.value) return
   const [dash, people, vendorList] = await Promise.all([api(`/events/${event.value.id}/dashboard`), api(`/events/${event.value.id}/participants?search=${encodeURIComponent(search.value)}`), api(`/events/${event.value.id}/vendors`)])
   dashboard.value = dash; participants.value = people; vendors.value = vendorList
+  monitoringLastUpdated.value = new Date()
+}
+async function refreshMonitoring() {
+  if (!event.value || activeView.value !== 'monitoring' || monitoringRefreshing.value) return
+  monitoringRefreshing.value = true
+  try {
+    await refreshEventData()
+    monitoringHistory.value = await api(`/events/${event.value.id}/attendance-logs?limit=50`)
+  } finally { monitoringRefreshing.value = false }
+}
+function startMonitoring() {
+  stopMonitoring()
+  refreshMonitoring()
+  monitoringTimer = window.setInterval(refreshMonitoring, 5000)
+}
+function stopMonitoring() {
+  if (monitoringTimer) { window.clearInterval(monitoringTimer); monitoringTimer = null }
 }
 async function refreshSearch() { if (event.value) participants.value = await api(`/events/${event.value.id}/participants?search=${encodeURIComponent(search.value)}`) }
+function clearCheckinPreview() {
+  checkinPreview.value = null
+  showWakilForm.value = false
+  wakilName.value = ''
+  wakilNotes.value = ''
+  wakilByParticipant.value = {}
+  checkinSubmitting.value = false
+  selectedDelegasiIds.value = []
+}
+
+function applyCheckinResult(result, mode) {
+  const p = result.participant
+  const isGroup = !!result.is_group
+  const groupNames = result.group_names || p?.group_names || (p ? [p.name] : [])
+  scanMessage.value = {
+    type: result.result === 'already_checked_in' ? 'warning' : 'success',
+    result: result.result,
+    participant: p,
+    isGroup,
+    groupNames,
+    groupSize: result.group_size || groupNames.length,
+    checkedInCount: result.checked_in_count ?? 0,
+    alreadyCheckedInCount: result.already_checked_in_count ?? 0,
+    checkedInAt: result.checked_in_at,
+    members: result.participants || [],
+    totalCheckedInCount: result.total_checked_in_count ?? result.checked_in_count ?? 0,
+    remainingCount: result.remaining_count ?? Math.max((result.group_size || groupNames.length) - (result.total_checked_in_count ?? 0), 0),
+    method: mode,
+    isSubstitute: !!result.is_substitute || !!result.attended_by,
+    attendedBy: result.attended_by || p?.attended_by || null,
+  }
+}
+
 async function checkIn(mode = 'qr', participantId = null) {
   if (!event.value) return
   try {
-    const payload = mode === 'qr' ? { token: scanToken.value.trim() } : { participant_id: participantId, notes: 'Verified at registration desk' }
-    const result = await api(`/events/${event.value.id}/attendance/${mode === 'qr' ? 'scan' : 'manual'}`, { method: 'POST', body: JSON.stringify(payload) })
-    const p = result.participant
-    scanMessage.value = {
-      type: result.result === 'already_checked_in' ? 'warning' : 'success',
-      result: result.result,
-      participant: p,
-      checkedInAt: result.checked_in_at,
-      method: mode
+    const body = mode === 'qr'
+      ? { token: scanToken.value.trim() }
+      : { participant_id: participantId }
+    if (mode === 'qr' && !body.token) return
+    if (activeView.value !== 'scanner') activeView.value = 'scanner'
+    const preview = await api(`/events/${event.value.id}/attendance/preview`, { method: 'POST', body: JSON.stringify(body) })
+    scanMessage.value = null
+    showWakilForm.value = false
+    wakilName.value = ''
+    wakilNotes.value = ''
+    wakilByParticipant.value = {}
+    checkinPreview.value = {
+      ...preview,
+      mode,
+      token: mode === 'qr' ? body.token : null,
+      participant_id: mode === 'manual' ? participantId : preview.participant?.id,
     }
-    scanToken.value = ''; await refreshEventData()
-  } catch (error) { scanMessage.value = { type: 'error', title: 'Scan tidak berhasil', text: error.message } }
+    selectedDelegasiIds.value = (preview.participants || [])
+      .filter(member => member.attendance_status !== 'checked_in')
+      .map(member => member.id)
+    if (mode === 'qr') scanToken.value = ''
+    if (preview.all_checked_in) {
+      applyCheckinResult({
+        ...preview,
+        result: 'already_checked_in',
+        checked_in_at: preview.participant?.check_in_at,
+      }, mode)
+      clearCheckinPreview()
+    }
+  } catch (error) {
+    clearCheckinPreview()
+    scanMessage.value = { type: 'error', title: 'Scan tidak berhasil', text: error.message }
+  }
+}
+
+async function confirmCheckin({ asSubstitute = false } = {}) {
+  if (!event.value || !checkinPreview.value) return
+  if (asSubstitute && previewIsGroup.value && !Object.values(wakilByParticipant.value).some(name => name.trim())) return
+  if (asSubstitute && !previewIsGroup.value && !wakilName.value.trim()) return
+  if (previewIsGroup.value && !selectedDelegasiIds.value.length) return
+  checkinSubmitting.value = true
+  const preview = checkinPreview.value
+  try {
+    const participantIds = previewIsGroup.value ? selectedDelegasiIds.value : undefined
+    const perMemberWakil = previewIsGroup.value
+      ? Object.fromEntries(Object.entries(wakilByParticipant.value).filter(([id, name]) => participantIds.includes(Number(id)) && name.trim()))
+      : undefined
+    const payload = preview.mode === 'qr'
+      ? {
+          token: preview.token,
+          notes: asSubstitute ? wakilNotes.value.trim() : 'Verified at registration desk',
+          is_substitute: asSubstitute,
+          attended_by: asSubstitute ? wakilName.value.trim() : null,
+          participant_ids: participantIds,
+          attended_by_by_participant: perMemberWakil,
+        }
+      : {
+          participant_id: preview.participant_id,
+          notes: asSubstitute ? wakilNotes.value.trim() : 'Verified at registration desk',
+          is_substitute: asSubstitute,
+          attended_by: asSubstitute ? wakilName.value.trim() : null,
+          participant_ids: participantIds,
+          attended_by_by_participant: perMemberWakil,
+        }
+    const result = await api(`/events/${event.value.id}/attendance/${preview.mode === 'qr' ? 'scan' : 'manual'}`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+    })
+    applyCheckinResult(result, preview.mode)
+    clearCheckinPreview()
+    await refreshEventData()
+  } catch (error) {
+    scanMessage.value = { type: 'error', title: 'Check-in gagal', text: error.message }
+  } finally {
+    checkinSubmitting.value = false
+  }
+}
+
+const previewIsGroup = computed(() => !!checkinPreview.value?.is_group)
+const previewMembers = computed(() => checkinPreview.value?.participants || [])
+const selectedDelegasiCount = computed(() => selectedDelegasiIds.value.length)
+function toggleDelegasiMember(id) {
+  if (!checkinPreview.value?.is_group) return
+  if (previewMembers.value.find(member => member.id === id)?.attendance_status === 'checked_in') return
+  selectedDelegasiIds.value = selectedDelegasiIds.value.includes(id)
+    ? selectedDelegasiIds.value.filter(item => item !== id)
+    : [...selectedDelegasiIds.value, id]
+}
+function selectAllPendingDelegasi() {
+  selectedDelegasiIds.value = previewMembers.value.filter(member => !member.check_in_at).map(member => member.id)
+}
+
+function openWakilForm() {
+  showWakilForm.value = true
+  wakilName.value = ''
+  wakilNotes.value = ''
+  wakilByParticipant.value = {}
+  nextTick(() => document.querySelector('#wakil-name-input')?.focus())
+}
+
+function cancelCheckinPreview() {
+  clearCheckinPreview()
+  nextTick(() => document.querySelector('#scan-input input')?.focus())
+}
+function resetParticipantForm() {
+  participantFormMode.value = 'single'
+  participantForm.value = { name: '', names: ['', ''], position: '', phone: '', email: '', vendor_id: null, table_id: null, seat_number: null }
+}
+function addGroupNameField() {
+  participantForm.value.names.push('')
+}
+function removeGroupNameField(index) {
+  if (participantForm.value.names.length <= 2) return
+  participantForm.value.names.splice(index, 1)
 }
 async function addParticipant() {
-  if (!participantForm.value.name.trim()) return
-  await api(`/events/${event.value.id}/participants`, { method: 'POST', body: JSON.stringify(participantForm.value) })
-  participantForm.value = { name: '', position: '', phone: '', email: '', vendor_id: null, table_id: null, seat_number: null }; showParticipantForm.value = false; await refreshEventData()
+  const shared = {
+    vendor_id: participantForm.value.vendor_id,
+    table_id: participantForm.value.table_id,
+    seat_number: participantForm.value.seat_number,
+    position: participantForm.value.position,
+    phone: participantForm.value.phone,
+    email: participantForm.value.email,
+  }
+  if (participantFormMode.value === 'group') {
+    const names = participantForm.value.names.map(n => n.trim()).filter(Boolean)
+    if (names.length < 2) return
+    await api(`/events/${event.value.id}/participants/group`, { method: 'POST', body: JSON.stringify({ names, ...shared }) })
+  } else {
+    if (!participantForm.value.name.trim()) return
+    await api(`/events/${event.value.id}/participants`, { method: 'POST', body: JSON.stringify({ name: participantForm.value.name.trim(), ...shared }) })
+  }
+  resetParticipantForm(); showParticipantForm.value = false; await refreshEventData()
+}
+function openParticipantForm() {
+  resetParticipantForm()
+  loadTables().then(() => { showParticipantForm.value = true })
+}
+function scanResultTitle(msg) {
+  if (!msg) return ''
+  if (msg.result === 'already_checked_in') return msg.isGroup ? 'Semua anggota sudah hadir' : 'Peserta sudah hadir'
+  if (msg.result === 'partial_checked_in') return msg.isGroup ? 'Kehadiran delegasi diperbarui' : 'Check-in berhasil'
+  if (msg.isSubstitute) return msg.isGroup ? 'Wakil delegasi berhasil dicatat' : 'Wakil berhasil dicatat'
+  return msg.isGroup ? 'Kehadiran delegasi berhasil dicatat' : 'Check-in berhasil'
 }
 function focusScanner() { activeView.value = 'scanner'; nextTick(() => document.querySelector('#scan-input')?.focus()) }
 
@@ -179,14 +369,23 @@ function downloadQr() {
   if (!qrImageUrl.value || !qrParticipant.value) return
   const link = document.createElement('a')
   link.href = qrImageUrl.value
-  link.download = `qr_${qrParticipant.value.name.replace(/\s+/g, '_')}_${qrParticipant.value.id}.png`
+  const p = qrParticipant.value
+  if (p.is_group) {
+    const label = (p.group_names || [p.name]).slice(0, 2).map(n => n.replace(/\s+/g, '_')).join('_')
+    link.download = `qr_delegasi_${label}.png`
+  } else {
+    link.download = `qr_${p.name.replace(/\s+/g, '_')}_${p.id}.png`
+  }
   link.click()
 }
 async function downloadAllQr() {
   if (!event.value) return
   try {
     const response = await fetch(`${API}/events/${event.value.id}/participants/qr-all`, { headers: { Authorization: `Bearer ${token.value}` } })
-    if (!response.ok) throw new Error('Gagal mengunduh QR Code')
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      throw new Error(body.detail || 'Gagal mengunduh QR Code')
+    }
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
@@ -194,6 +393,13 @@ async function downloadAllQr() {
     link.download = `qr_codes_${event.value.name.replace(/\s+/g, '_')}.zip`
     link.click()
     URL.revokeObjectURL(url)
+    const delegasiCount = participantRows.value.filter(r => r.type === 'delegasi').length
+    const soloCount = participantRows.value.filter(r => r.type === 'solo').length
+    scanMessage.value = {
+      type: 'success',
+      title: 'QR Code diunduh',
+      text: `${soloCount} individual + ${delegasiCount} delegasi (1 QR per undangan) dalam ZIP.`,
+    }
   } catch (error) { scanMessage.value = { type: 'error', title: 'Error', text: error.message } }
 }
 
@@ -235,43 +441,112 @@ onUnmounted(() => stopCamera())
 // Edit participant functions
 async function openEditForm(person) {
   await loadTables()
-  editForm.value = { id: person.id, name: person.name, vendor_id: person.vendor_id || null, table_id: person.table_id || null, seat_number: person.seat_number || null, position: person.position || '', phone: person.phone || '', email: person.email || '' }
+  const isGroup = !!person.is_group && !!person.qr_group_token
+  const names = isGroup
+    ? [...(person.group_names || [person.name])]
+    : [person.name]
+  while (names.length < 2) names.push('')
+  editForm.value = {
+    id: person.id,
+    is_group: isGroup,
+    qr_group_token: person.qr_group_token || null,
+    name: person.name,
+    names,
+    vendor_id: person.vendor_id || null,
+    table_id: person.table_id || null,
+    seat_number: person.seat_number || null,
+    position: person.position || '',
+    phone: person.phone || '',
+    email: person.email || '',
+  }
   showEditForm.value = true
 }
+function addEditGroupNameField() {
+  editForm.value.names.push('')
+}
+function removeEditGroupNameField(index) {
+  if (editForm.value.names.length <= 2) return
+  editForm.value.names.splice(index, 1)
+}
 async function saveEdit() {
-  if (!editForm.value.name.trim()) return
-  const { id, ...body } = editForm.value
-  await api(`/events/${event.value.id}/participants/${id}`, { method: 'PUT', body: JSON.stringify(body) })
-  showEditForm.value = false; await refreshEventData()
+  const shared = {
+    vendor_id: editForm.value.vendor_id,
+    table_id: editForm.value.table_id,
+    seat_number: editForm.value.seat_number,
+    position: editForm.value.position,
+    phone: editForm.value.phone,
+    email: editForm.value.email,
+  }
+  if (editForm.value.is_group && editForm.value.qr_group_token) {
+    const names = editForm.value.names.map(n => n.trim()).filter(Boolean)
+    if (names.length < 2) return
+    await api(`/events/${event.value.id}/participants/group/${encodeURIComponent(editForm.value.qr_group_token)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ names, ...shared }),
+    })
+  } else {
+    if (!editForm.value.name.trim()) return
+    await api(`/events/${event.value.id}/participants/${editForm.value.id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ name: editForm.value.name.trim(), ...shared }),
+    })
+  }
+  showEditForm.value = false
+  await refreshEventData()
 }
 
 // Delete participant functions
-function confirmDelete(person) { deleteTarget.value = person; showDeleteConfirm.value = true }
+function confirmDelete(person) {
+  deleteTarget.value = person
+  deleteWholeDelegasi.value = !!person.is_group
+  showDeleteConfirm.value = true
+}
 async function doDelete() {
   if (!deleteTarget.value) return
-  await api(`/events/${event.value.id}/participants/${deleteTarget.value.id}`, { method: 'DELETE' })
-  showDeleteConfirm.value = false; deleteTarget.value = null; await refreshEventData()
+  const person = deleteTarget.value
+  if (person.is_group && person.qr_group_token && deleteWholeDelegasi.value) {
+    await api(`/events/${event.value.id}/participants/group/${encodeURIComponent(person.qr_group_token)}`, { method: 'DELETE' })
+  } else {
+    await api(`/events/${event.value.id}/participants/${person.id}`, { method: 'DELETE' })
+  }
+  showDeleteConfirm.value = false
+  deleteTarget.value = null
+  await refreshEventData()
 }
 
 // Undo check-in functions
 function confirmUndo(person) { undoTarget.value = person; showUndoConfirm.value = true }
 async function doUndo() {
   if (!undoTarget.value) return
-  await api(`/events/${event.value.id}/attendance/undo`, { method: 'POST', body: JSON.stringify({ participant_id: undoTarget.value.id, notes: 'Undo from admin panel' }) })
-  showUndoConfirm.value = false; undoTarget.value = null; await refreshEventData()
+  const person = undoTarget.value
+  await api(`/events/${event.value.id}/attendance/undo`, {
+    method: 'POST',
+    body: JSON.stringify({
+      participant_id: person.id,
+      notes: 'Undo from admin panel',
+      undo_delegasi: !!person.is_group,
+    }),
+  })
+  showUndoConfirm.value = false
+  undoTarget.value = null
+  await refreshEventData()
 }
 
 // Import functions
 async function downloadTemplate() {
   if (!event.value) return
+  showExportDropdown.value = false
   try {
     const response = await fetch(`${API}/events/${event.value.id}/import/template`, { headers: { Authorization: `Bearer ${token.value}` } })
     if (!response.ok) throw new Error('Gagal mengunduh template')
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
-    link.href = url; link.download = `import_template_${event.value.name.replace(/\s+/g, '_')}.xlsx`; link.click()
+    link.href = url
+    link.download = `template_import_peserta_${event.value.name.replace(/\s+/g, '_')}.xlsx`
+    link.click()
     URL.revokeObjectURL(url)
+    scanMessage.value = { type: 'success', title: 'Template diunduh', text: 'Lihat sheet Contoh Penggunaan. Hijau = individu, biru/oranye = delegasi (kode sama = 1 QR). Hapus contoh lalu isi data asli.' }
   } catch (error) { scanMessage.value = { type: 'error', title: 'Error', text: error.message } }
 }
 async function handleImportFile(e) {
@@ -292,7 +567,12 @@ async function confirmImport() {
   importLoading.value = true
   try {
     const result = await api(`/events/${event.value.id}/import/confirm`, { method: 'POST', body: JSON.stringify({ rows: importPreview.value.rows, duplicate_action: importDuplicateAction.value }) })
-    scanMessage.value = { type: 'success', title: 'Import berhasil', text: `${result.created} dibuat, ${result.skipped} dilewati, ${result.updated} diperbarui` }
+    const delCount = (importPreview.value?.delegasi_groups || []).filter(g => g.jumlah >= 2).length
+    scanMessage.value = {
+      type: 'success',
+      title: 'Import berhasil',
+      text: `${result.created} dibuat, ${result.skipped} dilewati, ${result.updated} diperbarui${delCount ? ` · ${delCount} delegasi` : ''}${result.vendors_created ? ` · ${result.vendors_created} vendor baru` : ''}`,
+    }
     showImportPreview.value = false; importPreview.value = null; importFile.value = null; await refreshEventData()
   } catch (error) { scanMessage.value = { type: 'error', title: 'Import gagal', text: error.message } }
   finally { importLoading.value = false }
@@ -471,6 +751,8 @@ async function changeOwnPassword() {
 watch(activeView, async (v) => {
   if (v === 'users' && isAdmin.value) await loadUsers()
   if (v === 'settings' && isAdmin.value) { initEventSettings(); await loadEventStats() }
+  if (v === 'monitoring') startMonitoring()
+  else stopMonitoring()
 })
 
 // Close export dropdown on click outside
@@ -478,12 +760,54 @@ function closeExportDropdown(e) { if (showExportDropdown.value && !e.target.clos
 // Close event selector on click outside
 function closeEventSelector(e) { if (showEventSelector.value && !e.target.closest('.event-selector-wrap')) showEventSelector.value = false }
 onMounted(() => { document.addEventListener('click', closeExportDropdown); document.addEventListener('click', closeEventSelector) })
-onUnmounted(() => { document.removeEventListener('click', closeExportDropdown); document.removeEventListener('click', closeEventSelector) })
+onUnmounted(() => { document.removeEventListener('click', closeExportDropdown); document.removeEventListener('click', closeEventSelector); stopMonitoring() })
 
 const checkedIn = computed(() => dashboard.value?.summary?.checked_in || 0)
 const total = computed(() => dashboard.value?.summary?.total || 0)
 const lastCheckins = computed(() => dashboard.value?.recent || [])
 const unreadNotifs = computed(() => notifications.value.filter(n => !n.read).length)
+
+// Participants list: collapse multi-name delegasi into one parent row
+const expandedDelegasi = ref({})
+const participantRows = computed(() => {
+  const seen = new Set()
+  const rows = []
+  for (const person of participants.value) {
+    if (person.is_group && person.qr_group_token) {
+      if (seen.has(person.qr_group_token)) continue
+      seen.add(person.qr_group_token)
+      const members = participants.value
+        .filter(p => p.qr_group_token === person.qr_group_token)
+        .sort((a, b) => a.id - b.id)
+      const primary = members[0] || person
+      const checkedCount = members.filter(m => m.attendance_status === 'checked_in').length
+      rows.push({
+        type: 'delegasi',
+        key: person.qr_group_token,
+        primary,
+        members,
+        groupSize: primary.group_size || members.length,
+        checkedCount,
+        allChecked: members.length > 0 && checkedCount === members.length,
+        anyChecked: checkedCount > 0,
+      })
+    } else {
+      rows.push({ type: 'solo', key: `p-${person.id}`, primary: person, members: [person] })
+    }
+  }
+  return rows
+})
+function toggleDelegasi(key) {
+  expandedDelegasi.value = { ...expandedDelegasi.value, [key]: !expandedDelegasi.value[key] }
+}
+function delegasiStatusLabel(row) {
+  if (row.allChecked) return `${row.checkedCount}/${row.groupSize} hadir`
+  if (row.anyChecked) return `${row.checkedCount}/${row.groupSize} hadir`
+  return `0/${row.groupSize} belum hadir`
+}
+function setWakilForMember(id, value) {
+  wakilByParticipant.value = { ...wakilByParticipant.value, [id]: value }
+}
 
 async function loadNotifications() {
   if (!event.value) return
@@ -515,13 +839,14 @@ onMounted(() => {
 
 <template>
   <div v-if="!token" class="login-page">
-    <div class="login-art"><div class="art-orbit orbit-one"></div><div class="art-orbit orbit-two"></div><div class="art-content"><div class="brand large"><span class="brand-mark"><QrCode :size="21" /></span>gatherly<span class="brand-dot">.</span></div><p class="art-kicker">EVENT OPERATIONS, REIMAGINED</p><h1>Make every arrival<br /><em>feel effortless.</em></h1><p class="art-description">A calm, intelligent command center for your most important gatherings.</p><div class="art-stat"><ShieldCheck :size="18" /><span>Trusted attendance records<br /><b>Secure by design</b></span></div></div></div>
-    <div class="login-panel"><div class="login-inner"><div class="mobile-logo brand">gatherly<span class="brand-dot">.</span></div><p class="eyebrow">Welcome back</p><h2>Sign in to your workspace</h2><p class="login-subtitle">Manage your event, vendors, and attendance in one place.</p><form @submit.prevent="login"><label>Email address<input v-model="loginForm.email" type="email" placeholder="you@company.com" /></label><label>Password<div class="password-input"><input v-model="loginForm.password" type="password" placeholder="Your password" /><ShieldCheck :size="16" /></div></label><div v-if="loginError" class="form-error"><CircleAlert :size="15" />{{ loginError }}</div><button class="primary-button full" :disabled="loading">{{ loading ? 'Signing in...' : 'Continue to workspace' }} <span>&rarr;</span></button></form><p class="login-hint">Development access: <b>admin@example.com</b> / <b>admin123</b></p></div><span class="copyright">&copy; 2026 Gatherly. Built for better events.</span></div>
+    <div class="login-art"><div class="art-orbit orbit-one"></div><div class="art-orbit orbit-two"></div><div class="art-content"><div class="brand large"><span class="brand-mark"><QrCode :size="21" /></span><span>Event Registration</span></div><p class="art-kicker">EVENT MANAGEMENT PLATFORM</p><h1>Setiap kedatangan<br /><em>terasa lebih mudah.</em></h1><p class="art-description">Platform terpusat untuk mengelola registrasi dan check-in peserta event.</p><div class="art-stat"><ShieldCheck :size="18" /><span>Data kehadiran terpercaya<br /><b>Aman dan siap digunakan</b></span></div></div></div>
+     <div class="login-panel"><div class="login-inner"><div class="mobile-logo brand"><span>Event Registration</span></div><p class="eyebrow">Selamat datang kembali</p><h2>Masuk ke ruang kerja Anda</h2><p class="login-subtitle">Kelola event, peserta, dan check-in dalam satu tempat.</p><form @submit.prevent="login"><label>Email<input v-model="loginForm.email" type="email" autocomplete="username" placeholder="nama@perusahaan.com" required /></label><label>Kata sandi<div class="password-input"><input v-model="loginForm.password" type="password" autocomplete="current-password" placeholder="Masukkan kata sandi" required /><ShieldCheck :size="16" /></div></label><div v-if="loginError" class="form-error"><CircleAlert :size="15" />{{ loginError }}</div><button class="primary-button full" :disabled="loading">{{ loading ? 'Memproses...' : 'Masuk ke aplikasi' }} <span>&rarr;</span></button></form></div><span class="copyright">&copy; 2026 Event Registration &amp; Check-in System</span></div>
   </div>
 
   <div v-else class="app-shell">
     <aside :class="['sidebar', { open: mobileMenuOpen }]"><div class="sidebar-top"><div class="brand"><span class="brand-mark"><QrCode :size="20" /></span>gatherly<span class="brand-dot">.</span></div><button class="sidebar-close" @click="mobileMenuOpen = false"><X :size="20" /></button></div><p class="eyebrow">Workspace</p><nav><button :class="['nav-item', { active: activeView === 'overview' }]" @click="activeView = 'overview'; mobileMenuOpen = false"><LayoutDashboard :size="18" />Overview</button><button v-if="!isViewer" :class="['nav-item', { active: activeView === 'scanner' }]" @click="focusScanner(); mobileMenuOpen = false"><QrCode :size="18" />Scan attendance<span class="nav-badge">LIVE</span></button><button :class="['nav-item', { active: activeView === 'participants' }]" @click="activeView = 'participants'; mobileMenuOpen = false"><Users :size="18" />Participants</button><button :class="['nav-item', { active: activeView === 'seating' }]" @click="activeView = 'seating'; mobileMenuOpen = false"><Grid3x3 :size="18" />Seating</button><button :class="['nav-item', { active: activeView === 'vendors' }]" @click="activeView = 'vendors'; mobileMenuOpen = false"><UserRound :size="18" />Vendors</button><button v-if="isAdmin" :class="['nav-item', { active: activeView === 'users' }]" @click="activeView = 'users'; mobileMenuOpen = false"><Shield :size="18" />Users</button><button v-if="isAdmin" :class="['nav-item', { active: activeView === 'settings' }]" @click="activeView = 'settings'; mobileMenuOpen = false"><Settings :size="18" />Settings</button><button class="nav-item" @click="refreshEventData(); mobileMenuOpen = false"><RefreshCw :size="18" />Refresh data</button></nav>
-      <div v-if="event" class="event-selector-wrap" style="position:relative">
+       <button class="monitoring-shortcut" :class="{ active: activeView === 'monitoring' }" @click="activeView = 'monitoring'; mobileMenuOpen = false"><CircleCheck :size="18" /><span>Monitoring</span><span class="nav-badge">LIVE</span></button>
+       <div v-if="event" class="event-selector-wrap" style="position:relative">
         <div class="sidebar-event" @click.stop="showEventSelector = !showEventSelector" style="cursor:pointer">
           <div class="event-icon"><CalendarDays :size="18" /></div>
           <div>
@@ -544,18 +869,317 @@ onMounted(() => {
       </div>
     <div class="user-card"><div class="avatar">{{ user?.name?.slice(0, 2).toUpperCase() }}</div><div><strong>{{ user?.name }}</strong><span>{{ user?.role }}</span></div><button @click="logout" title="Sign out"><LogOut :size="15" /></button></div></aside>
     <main class="main-content"><header class="topbar"><button class="mobile-menu-btn" @click="mobileMenuOpen = true"><Menu :size="22" /></button><div class="mobile-brand brand">gatherly<span class="brand-dot">.</span></div><div class="top-actions"><span class="live-indicator"><i></i> System online</span><div class="dropdown-wrap"><button class="icon-button" @click.stop="toggleNotif"><Bell :size="19" /><span v-if="unreadNotifs" class="notif-badge"></span></button><div v-if="showNotifPanel" class="dropdown-menu notif-panel" @click.stop><div class="panel-header"><strong>Notifications</strong><button class="text-button" @click="markAllRead">Mark all read</button></div><div class="notif-list"><div v-if="!notifications.length" class="empty-state small">No new notifications.</div><div v-for="n in notifications" :key="n.id" :class="['notif-item', { unread: !n.read }]"><span :class="['notif-dot', n.type]"></span><div><p>{{ n.text }}</p><small>{{ new Date(n.time).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }} &middot; by {{ n.by }}</small></div></div></div></div></div><div class="dropdown-wrap"><div class="top-avatar" @click.stop="toggleProfile">{{ user?.name?.slice(0, 2).toUpperCase() }}</div><div v-if="showProfilePanel" class="dropdown-menu profile-panel" @click.stop><div class="profile-header"><div class="avatar">{{ user?.name?.slice(0, 2).toUpperCase() }}</div><div class="profile-info"><strong>{{ user?.name }}</strong><span>{{ user?.email }}</span><div><span :class="roleBadgeClass(user?.role)"></span></div></div></div><div class="dropdown-divider"></div><button @click="activeView = 'settings'; showProfilePanel = false"><Key :size="15" /> Change password</button><div class="dropdown-divider"></div><button @click="logout" class="danger-text"><Power :size="15" /> Sign out</button></div></div></div></header>
-      <section class="content"><div class="heading-row"><div><p class="eyebrow">{{ event?.event_date }} &middot; Event command center</p><h1>{{ activeView === 'overview' ? `${new Date().getHours() < 11 ? 'Good morning' : new Date().getHours() < 15 ? 'Good afternoon' : new Date().getHours() < 18 ? 'Good evening' : 'Good night'}, ${user?.name?.split(' ')[0]}` : activeView === 'scanner' ? 'Attendance scanner' : activeView === 'participants' ? 'Participants' : activeView === 'seating' ? 'Seating' : activeView === 'users' ? 'User management' : activeView === 'settings' ? 'Settings' : 'Vendor directory' }}<span class="wave">&#10022;</span></h1><p class="subtitle">{{ activeView === 'overview' ? 'Here is what is happening at your event today.' : activeView === 'users' ? 'Manage user accounts and roles.' : activeView === 'settings' ? 'Configure event and account settings.' : 'Everything you need to keep the room moving.' }}</p></div><button v-if="!isViewer && activeView !== 'settings' && activeView !== 'users'" class="primary-button" @click="focusScanner"><QrCode :size="18" /> Open scanner</button></div>
+      <section class="content"><div class="heading-row"><div><p class="eyebrow">{{ event?.event_date }} &middot; Event command center</p><h1>{{ activeView === 'overview' ? `${new Date().getHours() < 11 ? 'Good morning' : new Date().getHours() < 15 ? 'Good afternoon' : new Date().getHours() < 18 ? 'Good evening' : 'Good night'}, ${user?.name?.split(' ')[0]}` : activeView === 'scanner' ? 'Scanner kehadiran' : activeView === 'participants' ? 'Participants' : activeView === 'seating' ? 'Seating' : activeView === 'users' ? 'User management' : activeView === 'settings' ? 'Settings' : 'Vendor directory' }}<span class="wave">&#10022;</span></h1><p class="subtitle">{{ activeView === 'overview' ? 'Here is what is happening at your event today.' : activeView === 'scanner' ? 'Scan QR, konfirmasi undangan, atau catat jika yang datang adalah wakil.' : activeView === 'users' ? 'Manage user accounts and roles.' : activeView === 'settings' ? 'Configure event and account settings.' : 'Everything you need to keep the room moving.' }}</p></div><button v-if="!isViewer && activeView !== 'settings' && activeView !== 'users'" class="primary-button" @click="focusScanner"><QrCode :size="18" /> Buka scanner</button></div>
 
         <template v-if="activeView === 'overview'">
           <div class="event-banner"><div class="banner-copy"><span class="live-pill"><span></span> {{ event?.status || 'Live' }} event</span><h2>{{ event?.name }}</h2><p>{{ event?.location }} <span>&bull;</span> {{ event?.start_time }} &ndash; {{ event?.end_time }} WIB</p></div><div class="banner-date"><strong>{{ event?.event_date?.slice(8, 10) }}</strong><span>{{ event?.event_date?.slice(5, 7) }}</span></div></div>
           <div class="stats-grid"><article class="stat-card"><div class="stat-icon blue-icon"><Users :size="19" /></div><span>Total invitees</span><strong>{{ total }}</strong><small>Across {{ vendors.length }} companies</small></article><article class="stat-card"><div class="stat-icon green-icon"><CircleCheck :size="19" /></div><span>Checked in</span><strong>{{ checkedIn }}</strong><small class="positive">{{ dashboard?.summary?.rate || 0 }}% <em>attendance rate</em></small></article><article class="stat-card"><div class="stat-icon orange-icon"><QrCode :size="19" /></div><span>Remaining</span><strong>{{ dashboard?.summary?.remaining || 0 }}</strong><small>Ready for arrival</small></article><article class="stat-card accent-card"><span>System status</span><strong class="online-text">Live</strong><small>Updates on refresh</small><div class="progress"><span :style="{ width: `${dashboard?.summary?.rate || 0}%` }"></span></div></article></div>
           <div class="section-grid"><section class="panel chart-panel"><div class="panel-heading"><div><h3>Attendance progress</h3><p>Live snapshot of event arrivals</p></div><button class="select-button" @click="refreshEventData"><RefreshCw :size="13" /> Refresh</button></div><div class="big-progress"><div class="ring"><strong>{{ dashboard?.summary?.rate || 0 }}<small>%</small></strong><span>attended</span></div><div class="progress-copy"><strong>{{ checkedIn }} of {{ total }}</strong><span>participants have checked in</span><div class="bar large"><i :style="{ width: `${dashboard?.summary?.rate || 0}%` }"></i></div><small>Keep the welcome desk moving.</small></div></div></section><section class="panel progress-panel"><div class="panel-heading"><div><h3>Vendor attendance</h3><p>Participation by company</p></div><button class="text-button" @click="activeView = 'vendors'">View all</button></div><div v-for="vendor in (dashboard?.vendors || []).slice(0, 5)" :key="vendor.id" class="vendor-row"><div class="vendor-meta"><span>{{ String(vendor.id).padStart(2, '0') }}</span><strong>{{ vendor.company_name }}</strong><b>{{ vendor.checked_in }} / {{ vendor.total }}</b></div><div class="bar"><i :style="{ width: `${vendor.rate}%` }"></i></div></div></section></div>
-          <section class="panel activity-panel"><div class="panel-heading"><div><h3>Latest check-ins</h3><p>Real-time attendance activity</p></div><button class="text-button" @click="focusScanner">Scan next <span>&rarr;</span></button></div><div v-if="lastCheckins.length" class="table-wrap"><table><thead><tr><th>Attendee</th><th>Company</th><th>Check-in time</th><th>Status</th></tr></thead><tbody><tr v-for="person in lastCheckins" :key="person.id"><td><div class="person"><span class="person-avatar coral">{{ person.name.slice(0, 2).toUpperCase() }}</span><strong>{{ person.name }}</strong></div></td><td>{{ person.company_name }}</td><td>{{ new Date(person.check_in_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }} WIB</td><td><span class="status"><i></i>Checked in</span></td></tr></tbody></table></div><div v-else class="empty-state"><Sparkles :size="24" /><strong>No check-ins yet</strong><span>Scanned participants will appear here.</span></div></section>
+          <section class="panel activity-panel"><div class="panel-heading"><div><h3>Latest check-ins</h3><p>Real-time attendance activity</p></div><button class="text-button" @click="focusScanner">Scan next <span>&rarr;</span></button></div><div v-if="lastCheckins.length" class="table-wrap"><table><thead><tr><th>Attendee</th><th>Company</th><th>Check-in time</th><th>Status</th></tr></thead><tbody><tr v-for="person in lastCheckins" :key="person.id"><td><div class="person"><span class="person-avatar coral">{{ person.name.slice(0, 2).toUpperCase() }}</span><div class="person-meta"><strong>{{ person.name }}</strong><span v-if="person.attended_by" class="wakil-badge">Hadir: {{ person.attended_by }}</span></div></div></td><td>{{ person.company_name }}</td><td>{{ new Date(person.check_in_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }} WIB</td><td><span class="status"><i></i>{{ person.attended_by ? 'Wakil' : 'Checked in' }}</span></td></tr></tbody></table></div><div v-else class="empty-state"><Sparkles :size="24" /><strong>No check-ins yet</strong><span>Scanned participants will appear here.</span></div></section>
         </template>
 
-        <template v-else-if="activeView === 'scanner'"><section class="scanner-layout"><div class="panel scanner-panel"><div class="scanner-head"><div><span class="live-pill dark"><span></span> Scanner ready</span><h2>Scan a participant QR</h2><p>Point the camera at a QR Code or enter its token below.</p></div><div class="scanner-icon"><QrCode :size="35" /></div></div><div class="camera-container"><video ref="videoEl" class="camera-video" playsinline muted></video><div v-if="!cameraActive" class="camera-placeholder" @click="toggleCamera"><div class="scan-corners"></div><Camera :size="52" /><span>Tap to activate camera scanner</span><small>Or use the token field below</small></div></div><div class="camera-controls"><button :class="['camera-toggle', { active: cameraActive }]" @click="toggleCamera"><Camera v-if="!cameraActive" :size="17" /><CameraOff v-else :size="17" /> {{ cameraActive ? 'Stop camera' : 'Start camera' }}</button></div><div class="scan-form"><label id="scan-input">QR token<input v-model="scanToken" @keyup.enter="checkIn('qr')" placeholder="Paste or type participant token" autofocus /></label><button class="primary-button" @click="checkIn('qr')" :disabled="!scanToken.trim()"><Check :size="17" /> Confirm check-in</button></div><div v-if="scanMessage && scanMessage.participant" class="checkin-card-wrap"><div :class="['checkin-card', scanMessage.type]"><button class="checkin-card-close" @click="scanMessage = null"><X :size="16" /></button><div class="checkin-card-status"><div :class="['status-icon-ring', scanMessage.type]"><CircleCheck v-if="scanMessage.type === 'success'" :size="32" /><CircleAlert v-else :size="32" /></div><h3>{{ scanMessage.result === 'already_checked_in' ? 'Already Checked In' : 'Check-in Successful' }}</h3><span class="checkin-method">via {{ scanMessage.method === 'qr' ? 'QR Scan' : 'Manual' }}</span></div><div class="checkin-card-person"><div class="checkin-avatar">{{ scanMessage.participant.name.slice(0, 2).toUpperCase() }}</div><h2>{{ scanMessage.participant.name }}</h2><span class="checkin-position">{{ scanMessage.participant.position || 'Guest' }}</span></div><div class="checkin-card-details"><div class="checkin-detail"><Building2 :size="16" /><div><small>Company</small><strong>{{ scanMessage.participant.company_name }}</strong></div></div><div v-if="scanMessage.participant.table_number" class="checkin-detail"><MapPin :size="16" /><div><small>Table</small><strong>{{ scanMessage.participant.table_number }}{{ scanMessage.participant.table_zone ? ' &middot; ' + scanMessage.participant.table_zone : '' }}</strong></div></div><div v-if="scanMessage.participant.seat_number" class="checkin-detail"><Armchair :size="16" /><div><small>Seat</small><strong>{{ scanMessage.participant.seat_number }}</strong></div></div><div class="checkin-detail"><Clock :size="16" /><div><small>Time</small><strong>{{ scanMessage.checkedInAt ? new Date(scanMessage.checkedInAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' WIB' : '&mdash;' }}</strong></div></div><div class="checkin-detail"><Hash :size="16" /><div><small>ID</small><strong>#{{ String(scanMessage.participant.id).padStart(4, '0') }}</strong></div></div></div></div></div><div v-else-if="scanMessage" :class="['scan-result', scanMessage.type]"><CircleCheck v-if="scanMessage.type === 'success'" :size="22" /><CircleAlert v-else :size="22" /><div><strong>{{ scanMessage.title }}</strong><span>{{ scanMessage.text }}</span></div><button @click="scanMessage = null"><X :size="16" /></button></div></div><div class="panel quick-panel"><h3>Quick manual check-in</h3><p>Use this fallback when a guest cannot show their QR Code.</p><div class="search-field"><Search :size="16" /><input v-model="search" @input="refreshSearch" placeholder="Find a participant" /></div><div class="quick-list"><div v-for="person in participants.slice(0, 5)" :key="person.id" class="quick-person"><div class="person"><span class="person-avatar blue">{{ person.name.slice(0, 2).toUpperCase() }}</span><div><strong>{{ person.name }}</strong><span>{{ person.company_name }}</span></div></div><button v-if="person.attendance_status !== 'checked_in'" class="tiny-button" @click="checkIn('manual', person.id)">Check in</button><span v-else class="status"><i></i>Done</span></div></div></div></section></template>
+         <template v-else-if="activeView === 'monitoring'">
+           <section class="monitoring-page">
+             <div class="monitoring-hero"><div><span class="live-pill dark"><span></span> LIVE MONITORING</span><h2>Monitoring kehadiran</h2><p>Pantau kedatangan peserta secara otomatis dan real-time.</p></div><button class="select-button" @click="refreshMonitoring"><RefreshCw :size="14" :class="{ spin: monitoringRefreshing }" /> Perbarui sekarang</button></div>
+             <div class="monitoring-meta"><span><i class="monitoring-live-dot"></i> Terhubung ke data event</span><span v-if="monitoringLastUpdated">Pembaruan terakhir {{ monitoringLastUpdated.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}</span><span>Memperbarui otomatis setiap 5 detik</span></div>
+             <div class="monitoring-stats"><article class="monitoring-stat"><span>Total peserta</span><strong>{{ total }}</strong><small>Semua undangan event</small></article><article class="monitoring-stat success"><span>Sudah hadir</span><strong>{{ checkedIn }}</strong><small>{{ dashboard?.summary?.rate || 0 }}% dari total peserta</small></article><article class="monitoring-stat pending"><span>Belum hadir</span><strong>{{ dashboard?.summary?.remaining || 0 }}</strong><small>Menunggu kedatangan</small></article><article class="monitoring-stat accent"><span>Update status</span><strong>{{ monitoringRefreshing ? '...' : 'Live' }}</strong><small>Sinkronisasi aktif</small></article></div>
+             <div class="monitoring-grid"><section class="panel monitoring-progress"><div class="panel-heading"><div><h3>Progress kehadiran</h3><p>Ringkasan kondisi event saat ini</p></div><strong class="monitoring-rate">{{ dashboard?.summary?.rate || 0 }}%</strong></div><div class="monitoring-progress-track"><span :style="{ width: `${dashboard?.summary?.rate || 0}%` }"></span></div><div class="monitoring-progress-labels"><span>0 hadir</span><strong>{{ checkedIn }} dari {{ total }} peserta</strong><span>{{ total }} total</span></div></section><section class="panel monitoring-activity"><div class="panel-heading"><div><h3>Aktivitas terbaru</h3><p>Check-in terakhir yang tercatat</p></div><span class="live-badge"><i></i> Live</span></div><div v-if="lastCheckins.length" class="monitoring-activity-list"><div v-for="person in lastCheckins.slice(0, 8)" :key="person.id" class="monitoring-activity-item"><span class="person-avatar coral">{{ person.name.slice(0, 2).toUpperCase() }}</span><div><strong>{{ person.name }}</strong><small>{{ person.company_name }}<template v-if="person.attended_by"> · Wakil: {{ person.attended_by }}</template></small></div><time>{{ new Date(person.check_in_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }}</time></div></div><div v-else class="empty-state small"><span>Belum ada peserta yang check-in.</span></div></section></div>
+             <section class="panel monitoring-history"><div class="panel-heading"><div><h3>Riwayat aktivitas</h3><p>Log check-in dan perubahan status terbaru</p></div><span class="history-count">{{ monitoringHistory.length }} aktivitas</span></div><div v-if="monitoringHistory.length" class="monitoring-history-list"><div v-for="log in monitoringHistory" :key="log.id" class="monitoring-history-item"><span :class="['history-icon', log.result === 'checked_in' ? 'success' : log.result === 'undo' ? 'undo' : 'warning']"><CircleCheck v-if="log.result === 'checked_in'" :size="15" /><Undo2 v-else-if="log.result === 'undo'" :size="15" /><CircleAlert v-else :size="15" /></span><div class="history-main"><strong>{{ log.participant_name || 'Aktivitas sistem' }}</strong><span>{{ log.result === 'checked_in' ? 'Berhasil check-in' : log.result === 'undo' ? 'Check-in dibatalkan' : log.result === 'already_checked_in' ? 'Sudah check-in sebelumnya' : log.result === 'invalid_token' ? 'QR tidak valid' : log.result }}<template v-if="log.notes"> · {{ log.notes }}</template></span></div><div class="history-meta"><strong>{{ log.method === 'qr' ? 'QR Code' : 'Manual' }}</strong><small>{{ log.scanned_by_name || 'Sistem' }} · {{ new Date(log.scanned_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) }}</small></div></div></div><div v-else class="empty-state"><Clock :size="24" /><strong>Belum ada riwayat</strong><span>Aktivitas check-in akan muncul di sini.</span></div></section>
+             <section class="panel monitoring-vendors"><div class="panel-heading"><div><h3>Kehadiran per perusahaan</h3><p>Perbandingan peserta hadir dan total undangan</p></div><button class="text-button" @click="activeView = 'vendors'">Lihat perusahaan</button></div><div class="monitoring-vendor-list"><div v-for="vendor in dashboard?.vendors || []" :key="vendor.id" class="monitoring-vendor"><div><strong>{{ vendor.company_name }}</strong><span>{{ vendor.checked_in }} dari {{ vendor.total }} hadir</span></div><b>{{ vendor.rate }}%</b><div class="bar"><i :style="{ width: `${vendor.rate}%` }"></i></div></div></div></section>
+           </section>
+         </template>
 
-        <template v-else-if="activeView === 'participants'"><section class="panel activity-panel"><div class="panel-heading"><div><h3>All participants</h3><p>{{ participants.length }} records in this event</p></div><div class="panel-actions"><label v-if="canManage" class="select-button import-btn"><Upload :size="15" /> Import Excel<input type="file" accept=".xlsx,.xls" @change="handleImportFile" hidden /></label><div class="export-wrap" style="position:relative"><button class="select-button" @click.stop="showExportDropdown = !showExportDropdown"><FileSpreadsheet :size="15" /> Export <ChevronDown :size="13" /></button><div v-if="showExportDropdown" class="dropdown-menu"><button @click="exportFile('participants')">Peserta</button><button @click="exportFile('attendance')">Kehadiran</button><button @click="exportFile('vendors')">Vendor</button><button @click="exportFile('seating')">Seating</button><button @click="exportFile('audit')">Audit Log</button><button @click="downloadTemplate">Template Import</button></div></div><button v-if="canManage" class="select-button" @click="downloadAllQr"><Download :size="15" /> Download all QR</button><button v-if="canEdit" class="primary-button small" @click="loadTables().then(() => showParticipantForm = true)"><Plus :size="16" /> Add participant</button></div></div><div class="toolbar"><div class="search-field"><Search :size="16" /><input v-model="search" @input="refreshSearch" placeholder="Search name, phone, or email..." /></div><button class="select-button" @click="refreshEventData"><RefreshCw :size="13" /> Refresh</button></div><div class="table-wrap"><table><thead><tr><th>Participant</th><th>Company</th><th>Contact</th><th>Table / Seat</th><th>QR Code</th><th>Status</th><th>Action</th></tr></thead><tbody><tr v-for="person in participants" :key="person.id"><td><div class="person"><span class="person-avatar coral">{{ person.name.slice(0, 2).toUpperCase() }}</span><strong>{{ person.name }}</strong></div></td><td>{{ person.company_name }}</td><td>{{ person.phone || person.email || '&mdash;' }}</td><td>{{ person.table_number ? `Meja ${person.table_number}${person.seat_number ? ' / ' + person.seat_number : ''}` : '&mdash;' }}</td><td><button class="qr-button" @click="showQr(person)" title="Lihat QR Code"><Eye :size="14" /> <span>QR</span></button></td><td><span :class="['status', person.attendance_status === 'checked_in' ? '' : 'pending']"><i></i>{{ person.attendance_status === 'checked_in' ? 'Checked in' : 'Not arrived' }}</span></td><td><div class="action-buttons"><button v-if="person.attendance_status !== 'checked_in' && canEdit" class="tiny-button" @click="checkIn('manual', person.id)">Check in</button><button v-if="person.attendance_status === 'checked_in' && canEdit" class="icon-btn undo" @click="confirmUndo(person)" title="Undo check-in"><Undo2 :size="14" /></button><span v-if="person.attendance_status === 'checked_in' && !showUndoConfirm" class="muted">{{ new Date(person.check_in_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }}</span><button v-if="canEdit" class="icon-btn edit" @click="openEditForm(person)" title="Edit"><Pencil :size="14" /></button><button v-if="canManage" class="icon-btn delete" @click="confirmDelete(person)" title="Hapus"><Trash2 :size="14" /></button></div></td></tr></tbody></table></div></section></template>
+         <template v-else-if="activeView === 'scanner'">
+          <section class="scanner-layout">
+            <div class="panel scanner-panel">
+              <div class="scanner-head">
+                <div>
+                  <span class="live-pill dark"><span></span> Siap scan</span>
+                  <h2>Scan QR peserta</h2>
+                  <p>Arahkan kamera ke QR Code, atau cari nama di panel kanan.</p>
+                </div>
+                <div class="scanner-icon"><QrCode :size="35" /></div>
+              </div>
+
+              <div v-show="!checkinPreview" class="camera-container">
+                <video ref="videoEl" class="camera-video" playsinline muted></video>
+                <div v-if="!cameraActive" class="camera-placeholder" @click="toggleCamera">
+                  <div class="scan-corners"></div>
+                  <Camera :size="52" />
+                  <span>Ketuk untuk aktifkan kamera</span>
+                  <small>Atau gunakan pencarian manual di kanan</small>
+                </div>
+              </div>
+              <div v-show="!checkinPreview" class="camera-controls">
+                <button :class="['camera-toggle', { active: cameraActive }]" @click="toggleCamera">
+                  <Camera v-if="!cameraActive" :size="17" />
+                  <CameraOff v-else :size="17" />
+                  {{ cameraActive ? 'Stop kamera' : 'Start kamera' }}
+                </button>
+              </div>
+              <div v-show="!checkinPreview" class="scan-form">
+                <label id="scan-input">Token QR
+                  <input v-model="scanToken" @keyup.enter="checkIn('qr')" placeholder="Tempel atau ketik token QR" autofocus />
+                </label>
+                <button class="primary-button" @click="checkIn('qr')" :disabled="!scanToken.trim() || checkinSubmitting">
+                  <Search :size="17" /> Preview
+                </button>
+              </div>
+
+              <div v-if="checkinPreview" class="checkin-card-wrap">
+                <div class="checkin-card preview">
+                  <button type="button" class="checkin-card-close" @click="cancelCheckinPreview" title="Batal"><X :size="16" /></button>
+                  <div class="checkin-card-status">
+                    <div class="status-icon-ring warning"><UserRound :size="28" /></div>
+                    <h3>Konfirmasi kehadiran</h3>
+                    <span class="checkin-method">
+                      {{ checkinPreview.mode === 'qr' ? 'QR Scan' : 'Manual' }}
+                      <template v-if="checkinPreview.is_group"> · Delegasi {{ checkinPreview.group_size }} orang</template>
+                    </span>
+                   </div>
+                   <div class="checkin-card-person">
+                     <div class="checkin-company-hero"><Building2 :size="17" /><div><small>PERUSAHAAN</small><strong>{{ checkinPreview.participant.company_name || 'Peserta umum' }}</strong></div></div>
+                     <div class="checkin-avatar">{{ (checkinPreview.is_group ? 'D' : checkinPreview.participant.name.slice(0, 2)).toUpperCase() }}</div>
+                    <h2 v-if="!checkinPreview.is_group">{{ checkinPreview.participant.name }}</h2>
+                    <h2 v-else>Delegasi {{ checkinPreview.group_size }} orang</h2>
+                     <span v-if="checkinPreview.participant.position" class="checkin-position">{{ checkinPreview.participant.position }}</span>
+                     <div v-if="checkinPreview.is_group" class="delegasi-checkin-picker">
+                       <div class="delegasi-picker-head"><strong>Anggota yang hadir</strong><button type="button" class="text-button" @click="selectAllPendingDelegasi">Pilih semua yang belum hadir</button></div>
+                       <label v-for="member in previewMembers" :key="member.id" class="delegasi-member-option" :class="{ checked: member.attendance_status === 'checked_in', selected: selectedDelegasiIds.includes(member.id) }">
+                         <input type="checkbox" :checked="selectedDelegasiIds.includes(member.id)" :disabled="member.attendance_status === 'checked_in'" @change="toggleDelegasiMember(member.id)" />
+                         <span class="delegasi-member-copy"><strong>{{ member.name }}</strong><small v-if="member.attendance_status === 'checked_in'">Sudah hadir<template v-if="member.attended_by"> sebagai wakil {{ member.attended_by }}</template></small><small v-else>Belum hadir</small></span>
+                         <Check v-if="member.attendance_status === 'checked_in'" :size="15" />
+                       </label>
+                       <p class="delegasi-picker-help">{{ selectedDelegasiCount }} anggota akan dicatat hadir. Anggota yang sudah hadir tidak berubah.</p>
+                     </div>
+                  </div>
+                  <div class="checkin-card-details">
+                    <div class="checkin-detail">
+                      <Building2 :size="16" />
+                      <div><small>Perusahaan</small><strong>{{ checkinPreview.participant.company_name }}</strong></div>
+                    </div>
+                    <div v-if="checkinPreview.participant.table_number" class="checkin-detail">
+                      <MapPin :size="16" />
+                      <div><small>Meja</small><strong>{{ checkinPreview.participant.table_number }}</strong></div>
+                    </div>
+                    <div v-if="checkinPreview.participant.seat_number" class="checkin-detail">
+                      <Armchair :size="16" />
+                      <div><small>Kursi</small><strong>{{ checkinPreview.participant.seat_number }}</strong></div>
+                    </div>
+                    <div class="checkin-detail">
+                      <Hash :size="16" />
+                      <div><small>Status undangan</small><strong>{{ checkinPreview.already_checked_in_count }}/{{ checkinPreview.group_size }} sudah hadir</strong></div>
+                    </div>
+                  </div>
+
+                  <div v-if="!showWakilForm" class="checkin-footer">
+                     <p class="confirm-prompt">{{ checkinPreview.is_group ? `Catat ${selectedDelegasiCount} anggota yang hadir?` : 'Apakah yang datang sesuai undangan di atas?' }}</p>
+                    <div class="checkin-confirm-actions">
+                      <button class="primary-button" :disabled="checkinSubmitting" @click="confirmCheckin({ asSubstitute: false })">
+                         <Check :size="17" /> {{ checkinSubmitting ? 'Memproses...' : (checkinPreview.is_group ? 'Catat kehadiran terpilih' : 'Ya, absen sekarang') }}
+                      </button>
+                      <button class="select-button wakil-btn" :disabled="checkinSubmitting" @click="openWakilForm">
+                        <UserRound :size="17" /> Yang datang wakil
+                      </button>
+                      <button class="text-button cancel-link" :disabled="checkinSubmitting" @click="cancelCheckinPreview">Batal / scan ulang</button>
+                    </div>
+                  </div>
+
+                    <div v-else class="checkin-footer wakil-form">
+                     <p class="confirm-prompt">{{ checkinPreview.is_group ? 'Isi nama wakil untuk setiap anggota yang hadir sebagai pengganti. Biarkan kosong jika anggota datang sendiri.' : 'Isi nama orang yang hadir sebagai pengganti peserta.' }}</p>
+                    <template v-if="checkinPreview.is_group">
+                      <div class="wakil-member-fields">
+                        <label v-for="member in previewMembers.filter(item => selectedDelegasiIds.includes(item.id))" :key="`wakil-${member.id}`">
+                          <span>{{ member.name }}</span>
+                          <input :value="wakilByParticipant[member.id] || ''" :placeholder="`Nama wakil untuk ${member.name}`" @input="setWakilForMember(member.id, $event.target.value)" />
+                        </label>
+                      </div>
+                    </template>
+                    <label v-else>Nama wakil
+                      <input id="wakil-name-input" v-model="wakilName" required placeholder="Contoh: Budi Santoso" @keyup.enter="confirmCheckin({ asSubstitute: true })" />
+                    </label>
+                    <label>Catatan (opsional)
+                      <input v-model="wakilNotes" placeholder="Mis. surat kuasa / asisten" />
+                    </label>
+                    <div class="checkin-confirm-actions">
+                       <button class="primary-button" :disabled="checkinSubmitting || (checkinPreview.is_group ? !Object.values(wakilByParticipant).some(name => name.trim()) : !wakilName.trim())" @click="confirmCheckin({ asSubstitute: true })">
+                        <Check :size="17" /> {{ checkinSubmitting ? 'Memproses...' : 'Absen sebagai wakil' }}
+                      </button>
+                      <button class="select-button" :disabled="checkinSubmitting" @click="showWakilForm = false">Kembali</button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else-if="scanMessage && scanMessage.participant" class="checkin-card-wrap">
+                <div :class="['checkin-card', scanMessage.type]">
+                  <button type="button" class="checkin-card-close" @click="scanMessage = null"><X :size="16" /></button>
+                  <div class="checkin-card-status">
+                    <div :class="['status-icon-ring', scanMessage.type]">
+                      <CircleCheck v-if="scanMessage.type === 'success'" :size="32" />
+                      <CircleAlert v-else :size="32" />
+                    </div>
+                    <h3>{{ scanResultTitle(scanMessage) }}</h3>
+                    <span class="checkin-method">
+                      via {{ scanMessage.method === 'qr' ? 'QR Scan' : 'Manual' }}
+                      <template v-if="scanMessage.isGroup"> · {{ scanMessage.groupSize }} orang</template>
+                      <template v-if="scanMessage.isSubstitute"> · Wakil</template>
+                    </span>
+                   </div>
+                   <div class="checkin-card-person">
+                      <div :class="['checkin-company-hero', { success: scanMessage.type === 'success' }]" ><Building2 :size="17" /><div><small>PERUSAHAAN</small><strong>{{ scanMessage.participant.company_name || 'Peserta umum' }}</strong></div></div>
+                     <div class="checkin-avatar">{{ (scanMessage.isGroup ? 'D' : scanMessage.participant.name.slice(0, 2)).toUpperCase() }}</div>
+                    <h2 v-if="!scanMessage.isGroup">{{ scanMessage.participant.name }}</h2>
+                    <h2 v-else>Delegasi {{ scanMessage.groupSize }} orang</h2>
+                    <span v-if="scanMessage.isSubstitute" class="wakil-badge">Hadir: {{ scanMessage.attendedBy }}</span>
+                     <span v-if="scanMessage.participant.position" class="checkin-position">{{ scanMessage.participant.position }}</span>
+                    <div v-if="scanMessage.isGroup" class="result-member-list">
+                       <div v-for="member in scanMessage.members" :key="member.id" class="result-member-row">
+                         <span>{{ member.name }}</span>
+                         <small :class="['status', member.attendance_status === 'checked_in' ? '' : 'pending']"><i></i>{{ member.attendance_status === 'checked_in' ? (member.attended_by ? `Wakil: ${member.attended_by}` : 'Hadir') : 'Belum hadir' }}</small>
+                       </div>
+                     </div>
+                  </div>
+                  <div class="checkin-card-details">
+                     <div v-if="scanMessage.participant.table_number" class="checkin-detail">
+                      <MapPin :size="16" />
+                      <div>
+                        <small>Meja</small>
+                        <strong>
+                          {{ scanMessage.participant.table_number }}
+                          <template v-if="scanMessage.participant.table_zone"> · {{ scanMessage.participant.table_zone }}</template>
+                        </strong>
+                      </div>
+                    </div>
+                    <div v-if="scanMessage.participant.seat_number" class="checkin-detail">
+                      <Armchair :size="16" />
+                      <div><small>Kursi</small><strong>{{ scanMessage.participant.seat_number }}</strong></div>
+                    </div>
+                     <div v-if="scanMessage.type !== 'success'" class="checkin-detail">
+                       <Building2 :size="16" />
+                       <div><small>Perusahaan</small><strong>{{ scanMessage.participant.company_name }}</strong></div>
+                     </div>
+                     <div class="checkin-detail checkin-time-detail">
+                       <Clock :size="16" />
+                      <div>
+                        <small>Waktu</small>
+                        <strong>
+                          {{ scanMessage.checkedInAt
+                            ? new Date(scanMessage.checkedInAt).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) + ' WIB'
+                            : '—' }}
+                        </strong>
+                      </div>
+                    </div>
+                    <div class="checkin-detail">
+                      <Hash :size="16" />
+                      <div>
+                         <small>{{ scanMessage.isGroup ? 'Total hadir' : 'ID' }}</small>
+                         <strong v-if="scanMessage.isGroup">{{ scanMessage.totalCheckedInCount }} / {{ scanMessage.groupSize }}</strong>
+                        <strong v-else>#{{ String(scanMessage.participant.id).padStart(4, '0') }}</strong>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="checkin-footer compact">
+                    <button class="primary-button" @click="scanMessage = null">Scan berikutnya</button>
+                  </div>
+                </div>
+              </div>
+
+              <div v-else-if="scanMessage" :class="['scan-result', scanMessage.type]">
+                <CircleCheck v-if="scanMessage.type === 'success'" :size="22" />
+                <CircleAlert v-else :size="22" />
+                <div><strong>{{ scanMessage.title }}</strong><span>{{ scanMessage.text }}</span></div>
+                <button type="button" @click="scanMessage = null"><X :size="16" /></button>
+              </div>
+            </div>
+
+            <div class="panel quick-panel">
+              <h3>Check-in manual</h3>
+              <p>Jika tamu tidak membawa QR, cari nama atau perusahaan di bawah.</p>
+              <div class="search-field">
+                <Search :size="16" />
+                <input v-model="search" @input="refreshSearch" placeholder="Cari nama atau perusahaan..." />
+              </div>
+              <div class="quick-list">
+                <div v-for="person in participants.slice(0, 8)" :key="person.id" class="quick-person">
+                  <div class="person">
+                    <span class="person-avatar blue">{{ person.name.slice(0, 2).toUpperCase() }}</span>
+                    <div>
+                      <strong>{{ person.name }}</strong>
+                      <span>{{ person.company_name }}</span>
+                      <span v-if="person.attended_by" class="wakil-badge">Hadir: {{ person.attended_by }}</span>
+                    </div>
+                  </div>
+                  <button
+                    v-if="person.attendance_status !== 'checked_in'"
+                    class="tiny-button"
+                    :disabled="!!checkinPreview || checkinSubmitting"
+                    @click="checkIn('manual', person.id)"
+                  >Konfirmasi</button>
+                  <span v-else class="status"><i></i>{{ person.attended_by ? 'Wakil' : 'Hadir' }}</span>
+                </div>
+                <div v-if="!participants.length" class="empty-state small">
+                  <span>Tidak ada hasil pencarian.</span>
+                </div>
+              </div>
+            </div>
+          </section>
+        </template>
+
+<template v-else-if="activeView === 'participants'"><section class="panel activity-panel"><div class="panel-heading"><div><h3>All participants</h3><p>{{ participantRows.length }} undangan &middot; {{ participants.length }} nama</p></div><div class="panel-actions"><button v-if="canManage" class="select-button" @click="downloadTemplate" title="Download template Excel untuk import (termasuk kolom delegasi)"><FileSpreadsheet :size="15" /> Template Excel</button><label v-if="canManage" class="select-button import-btn"><Upload :size="15" /> Import Excel<input type="file" accept=".xlsx,.xls" @change="handleImportFile" hidden /></label><div class="export-wrap" style="position:relative"><button class="select-button" @click.stop="showExportDropdown = !showExportDropdown"><Download :size="15" /> Export <ChevronDown :size="13" /></button><div v-if="showExportDropdown" class="dropdown-menu"><button @click="exportFile('participants')">Peserta</button><button @click="exportFile('attendance')">Kehadiran</button><button @click="exportFile('vendors')">Vendor</button><button @click="exportFile('seating')">Seating</button><button @click="exportFile('audit')">Audit Log</button></div></div><button v-if="canManage" class="select-button" @click="downloadAllQr" title="1 QR per undangan; delegasi share 1 file QR"><Download :size="15" /> Download all QR</button><button v-if="canEdit" class="primary-button small" @click="openParticipantForm"><Plus :size="16" /> Add participant</button></div></div><div class="toolbar"><div class="search-field"><Search :size="16" /><input v-model="search" @input="refreshSearch" placeholder="Cari nama, perusahaan, telepon, atau email..." /></div><button class="select-button" @click="refreshEventData"><RefreshCw :size="13" /> Refresh</button></div><div v-if="scanMessage && !scanMessage.participant" :class="['scan-result', scanMessage.type]" style="margin:0 0 14px"><CircleCheck v-if="scanMessage.type === 'success'" :size="18" /><CircleAlert v-else :size="18" /><div><strong>{{ scanMessage.title }}</strong><span>{{ scanMessage.text }}</span></div><button @click="scanMessage = null"><X :size="16" /></button></div><div class="table-wrap participants-wrap"><table class="participants-table"><thead><tr><th>Participant</th><th>Company</th><th>Contact</th><th>Table / Seat</th><th>QR Code</th><th>Status</th><th>Action</th></tr></thead><tbody>
+   <template v-for="row in participantRows" :key="row.key">
+<tr :class="['invite-row', { 'is-delegasi': row.type === 'delegasi', 'is-expanded': row.type === 'delegasi' && expandedDelegasi[row.key] }]">
+<td data-label="Peserta">
+  <div class="person">
+    <button v-if="row.type === 'delegasi'" type="button" class="expand-btn" @click="toggleDelegasi(row.key)" :title="expandedDelegasi[row.key] ? 'Tutup' : 'Lihat anggota'">
+      <ChevronDown :size="16" :class="{ open: expandedDelegasi[row.key] }" />
+    </button>
+    <span v-else class="expand-spacer"></span>
+    <span :class="['person-avatar', row.type === 'delegasi' ? 'blue' : 'coral']">{{ row.type === 'delegasi' ? 'D' : row.primary.name.slice(0, 2).toUpperCase() }}</span>
+    <div class="person-meta">
+      <strong v-if="row.type === 'delegasi'">Delegasi {{ row.groupSize }} orang</strong>
+      <strong v-else>{{ row.primary.name }}</strong>
+      <span v-if="row.type === 'delegasi'" class="group-badge" :title="(row.primary.group_names || []).join(', ')">{{ (row.primary.group_names || []).slice(0, 2).join(', ') }}{{ (row.primary.group_names || []).length > 2 ? '…' : '' }}</span>
+       <span v-if="row.primary.attended_by" class="wakil-badge">Hadir: {{ row.primary.attended_by }}</span>
+     </div>
+   </div>
+ </td>
+<td data-label="Perusahaan">{{ row.primary.company_name }}</td>
+<td data-label="Kontak">{{ row.primary.phone || row.primary.email || '—' }}</td>
+<td data-label="Meja / Kursi">{{ row.primary.table_number ? `Meja ${row.primary.table_number}${row.primary.seat_number ? ' / ' + row.primary.seat_number : ''}` : '—' }}</td>
+<td data-label="QR"><button class="qr-button" @click="showQr(row.primary)" title="Lihat QR Code"><Eye :size="14" /> <span>QR</span></button></td>
+<td data-label="Status">
+  <span v-if="row.type === 'delegasi'" :class="['status', row.allChecked ? '' : 'pending']"><i></i>{{ delegasiStatusLabel(row) }}</span>
+  <span v-else :class="['status', row.primary.attendance_status === 'checked_in' ? '' : 'pending']"><i></i>{{ row.primary.attendance_status === 'checked_in' ? (row.primary.attended_by ? 'Wakil' : 'Checked in') : 'Not arrived' }}</span>
+</td>
+<td data-label="Aksi">
+  <div class="action-buttons">
+    <button v-if="row.type === 'solo' && row.primary.attendance_status !== 'checked_in' && canEdit" class="tiny-button" @click="checkIn('manual', row.primary.id)">Check in</button>
+    <button v-else-if="row.type === 'delegasi' && !row.allChecked && canEdit" class="tiny-button" @click="checkIn('manual', row.primary.id)">Check in</button>
+    <button v-if="(row.type === 'solo' ? row.primary.attendance_status === 'checked_in' : row.anyChecked) && canEdit" class="icon-btn undo" @click="confirmUndo(row.primary)" title="Undo check-in"><Undo2 :size="14" /></button>
+    <span v-if="row.type === 'solo' && row.primary.attendance_status === 'checked_in'" class="muted">{{ new Date(row.primary.check_in_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }}</span>
+    <button v-if="canEdit" class="icon-btn edit" @click="openEditForm(row.primary)" title="Edit"><Pencil :size="14" /></button>
+    <button v-if="canManage" class="icon-btn delete" @click="confirmDelete(row.primary)" title="Hapus"><Trash2 :size="14" /></button>
+  </div>
+</td>
+</tr>
+<tr v-for="member in (row.type === 'delegasi' && expandedDelegasi[row.key] ? row.members : [])" :key="'m-' + member.id" class="delegasi-member-row">
+<td data-label="Anggota">
+  <div class="person member-person">
+    <span class="expand-spacer"></span>
+    <span class="person-avatar coral">{{ member.name.slice(0, 2).toUpperCase() }}</span>
+    <div class="person-meta"><strong>{{ member.name }}</strong><span v-if="member.attended_by" class="wakil-badge">Hadir: {{ member.attended_by }}</span></div>
+  </div>
+</td>
+<td data-label="Perusahaan" class="muted-cell">{{ member.company_name }}</td>
+<td data-label="Kontak" class="muted-cell">{{ member.phone || member.email || '—' }}</td>
+<td data-label="Meja / Kursi" class="muted-cell">{{ member.table_number ? `Meja ${member.table_number}${member.seat_number ? ' / ' + member.seat_number : ''}` : '—' }}</td>
+<td data-label="QR" class="muted-cell"><span class="shared-qr-hint">sama QR</span></td>
+<td data-label="Status"><span :class="['status', member.attendance_status === 'checked_in' ? '' : 'pending']"><i></i>{{ member.attendance_status === 'checked_in' ? (member.attended_by ? 'Wakil' : 'Checked in') : 'Not arrived' }}</span></td>
+<td data-label="Aksi"><div class="action-buttons"><span v-if="member.attendance_status === 'checked_in'" class="muted">{{ new Date(member.check_in_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }}</span></div></td>
+</tr>
+</template>
+</tbody></table></div></section></template>
 
         <template v-else-if="activeView === 'seating'"><section class="panel activity-panel"><div class="panel-heading"><div><h3>Table management</h3><p>{{ tables.length }} tables configured</p></div><div class="panel-actions"><button v-if="canManage" class="select-button" @click="showBulkForm = true"><Plus :size="15" /> Bulk create</button><button v-if="canManage" class="primary-button small" @click="showTableForm = true"><Plus :size="16" /> Add table</button></div></div><div class="seating-grid"><article v-for="tbl in tables" :key="tbl.id" class="panel table-card" @click="toggleExpandTable(tbl.id)"><div class="table-card-head"><div><strong>{{ tbl.table_label || tbl.table_number }}</strong><span v-if="tbl.zone" class="zone-badge">{{ tbl.zone }}</span></div><button v-if="canManage" class="icon-btn delete" @click.stop="deleteTable(tbl.id)" title="Hapus meja"><Trash2 :size="14" /></button></div><div class="table-card-stats"><span>{{ tbl.seated }} / {{ tbl.capacity }}</span><small>terisi</small></div><div class="bar"><i :style="{ width: `${tbl.capacity ? (tbl.seated / tbl.capacity) * 100 : 0}%` }"></i></div><div v-if="expandedTable === tbl.id" class="table-expanded" @click.stop><div v-if="seatedParticipants(tbl.id).length" class="seated-list"><div v-for="p in seatedParticipants(tbl.id)" :key="p.id" class="seated-person"><span class="person-avatar coral">{{ p.name.slice(0, 2).toUpperCase() }}</span><div><strong>{{ p.name }}</strong><small>Kursi {{ p.seat_number || '&mdash;' }} &middot; {{ p.company_name }}</small></div></div></div><div v-else class="empty-state small"><span>Belum ada peserta di meja ini.</span></div></div></article></div></section></template>
 
@@ -644,12 +1268,12 @@ onMounted(() => {
         <template v-else><section class="vendor-cards"><article v-for="vendor in vendors" :key="vendor.id" class="panel vendor-card"><div class="vendor-avatar"><Users :size="19" /></div><h3>{{ vendor.company_name }}</h3><span>{{ vendor.category }}</span><div class="vendor-count"><strong>{{ vendor.participant_count }}</strong><small>participants</small></div><div class="bar"><i :style="{ width: `${dashboard?.vendors?.find(v => v.id === vendor.id)?.rate || 0}%` }"></i></div></article></section></template>
       </section>
     </main>
-    <div v-if="showParticipantForm" class="modal-backdrop" @click.self="showParticipantForm = false"><form class="modal" @submit.prevent="addParticipant"><button type="button" class="modal-close" @click="showParticipantForm = false"><X :size="18" /></button><p class="eyebrow">New registration</p><h2>Add participant</h2><p class="subtitle">Create a QR token automatically for this guest.</p><label>Full name<input v-model="participantForm.name" required placeholder="e.g. Raka Pratama" /></label><label>Company<select v-model="participantForm.vendor_id"><option :value="null">Select company</option><option v-for="vendor in vendors" :key="vendor.id" :value="vendor.id">{{ vendor.company_name }}</option></select></label><label>Position<input v-model="participantForm.position" placeholder="Vendor representative" /></label><label>Phone<input v-model="participantForm.phone" placeholder="08xx" /></label><label>Email<input v-model="participantForm.email" type="email" placeholder="email@company.com" /></label><label>Table<select v-model="participantForm.table_id"><option :value="null">No table assigned</option><option v-for="tbl in tables" :key="tbl.id" :value="tbl.id">{{ tbl.table_label || tbl.table_number }} ({{ tbl.zone || 'No zone' }})</option></select></label><label>Seat number<input v-model.number="participantForm.seat_number" type="number" min="1" placeholder="e.g. 3" /></label><button class="primary-button full" type="submit"><Plus :size="17" /> Create participant</button></form></div>
-    <div v-if="showQrModal" class="modal-backdrop" @click.self="closeQrModal"><div class="modal qr-modal"><button type="button" class="modal-close" @click="closeQrModal"><X :size="18" /></button><p class="eyebrow">QR Code</p><h2>{{ qrParticipant?.name }}</h2><p class="subtitle">{{ qrParticipant?.company_name }} &bull; Token: <code>{{ qrParticipant?.qr_token?.slice(0, 12) }}...</code></p><div class="qr-preview"><div v-if="qrLoading" class="qr-loading"><RefreshCw :size="28" class="spin" /><span>Generating QR Code...</span></div><img v-else-if="qrImageUrl" :src="qrImageUrl" :alt="`QR Code ${qrParticipant?.name}`" /></div><div class="qr-actions"><button class="primary-button" @click="downloadQr"><Download :size="17" /> Download PNG</button><button class="select-button" @click="closeQrModal">Tutup</button></div></div></div>
-    <div v-if="showEditForm" class="modal-backdrop" @click.self="showEditForm = false"><form class="modal" @submit.prevent="saveEdit"><button type="button" class="modal-close" @click="showEditForm = false"><X :size="18" /></button><p class="eyebrow">Edit data</p><h2>Edit participant</h2><p class="subtitle">Update participant information.</p><label>Full name<input v-model="editForm.name" required placeholder="Full name" /></label><label>Company<select v-model="editForm.vendor_id"><option :value="null">Select company</option><option v-for="vendor in vendors" :key="vendor.id" :value="vendor.id">{{ vendor.company_name }}</option></select></label><label>Table<select v-model="editForm.table_id"><option :value="null">No table assigned</option><option v-for="tbl in tables" :key="tbl.id" :value="tbl.id">{{ tbl.table_label || tbl.table_number }} ({{ tbl.zone || 'No zone' }})</option></select></label><label>Seat number<input v-model.number="editForm.seat_number" type="number" min="1" placeholder="e.g. 3" /></label><label>Position<input v-model="editForm.position" placeholder="Position" /></label><label>Phone<input v-model="editForm.phone" placeholder="08xx" /></label><label>Email<input v-model="editForm.email" type="email" placeholder="email@company.com" /></label><button class="primary-button full" type="submit"><Check :size="17" /> Save changes</button></form></div>
-    <div v-if="showDeleteConfirm" class="modal-backdrop" @click.self="showDeleteConfirm = false"><div class="modal modal-sm"><button type="button" class="modal-close" @click="showDeleteConfirm = false"><X :size="18" /></button><p class="eyebrow">Konfirmasi</p><h2>Hapus peserta?</h2><p class="subtitle">{{ deleteTarget?.name }} akan dihapus secara permanen dari event ini.</p><div class="qr-actions"><button class="primary-button danger" @click="doDelete"><Trash2 :size="17" /> Hapus</button><button class="select-button" @click="showDeleteConfirm = false">Batal</button></div></div></div>
-    <div v-if="showUndoConfirm" class="modal-backdrop" @click.self="showUndoConfirm = false"><div class="modal modal-sm"><button type="button" class="modal-close" @click="showUndoConfirm = false"><X :size="18" /></button><p class="eyebrow">Konfirmasi</p><h2>Undo check-in?</h2><p class="subtitle">Status kehadiran {{ undoTarget?.name }} akan dikembalikan ke belum hadir.</p><div class="qr-actions"><button class="primary-button" @click="doUndo"><Undo2 :size="17" /> Undo check-in</button><button class="select-button" @click="showUndoConfirm = false">Batal</button></div></div></div>
-    <div v-if="showImportPreview" class="modal-backdrop" @click.self="showImportPreview = false"><div class="modal modal-lg"><button type="button" class="modal-close" @click="showImportPreview = false"><X :size="18" /></button><p class="eyebrow">Import preview</p><h2>Preview data import</h2><p class="subtitle">{{ importPreview?.total_rows }} baris ditemukan &middot; {{ importPreview?.errors?.length || 0 }} error &middot; {{ importPreview?.new_vendors?.length || 0 }} vendor baru &middot; {{ importPreview?.new_tables?.length || 0 }} meja baru</p><div v-if="importPreview?.errors?.length" class="import-errors"><div v-for="(err, i) in importPreview.errors" :key="i" class="scan-result error"><CircleAlert :size="16" /><span>{{ err }}</span></div></div><div class="table-wrap" style="max-height:300px;overflow-y:auto"><table><thead><tr><th>Nama</th><th>Company</th><th>Phone</th><th>Email</th><th>Table</th><th>Seat</th></tr></thead><tbody><tr v-for="(row, i) in (importPreview?.rows || []).slice(0, 50)" :key="i"><td>{{ row.name }}</td><td>{{ row.company_name || row.vendor_name || '&mdash;' }}</td><td>{{ row.phone || '&mdash;' }}</td><td>{{ row.email || '&mdash;' }}</td><td>{{ row.table_number || '&mdash;' }}</td><td>{{ row.seat_number || '&mdash;' }}</td></tr></tbody></table></div><div class="import-actions"><label>Duplikat:<select v-model="importDuplicateAction"><option value="skip">Lewati</option><option value="update">Perbarui</option></select></label><div class="qr-actions"><button class="primary-button" @click="confirmImport" :disabled="importLoading"><Check :size="17" /> {{ importLoading ? 'Importing...' : 'Confirm import' }}</button><button class="select-button" @click="showImportPreview = false">Batal</button></div></div></div></div>
+    <div v-if="showParticipantForm" class="modal-backdrop" @click.self="showParticipantForm = false"><form class="modal" @submit.prevent="addParticipant"><button type="button" class="modal-close" @click="showParticipantForm = false"><X :size="18" /></button><p class="eyebrow">New registration</p><h2>{{ participantFormMode === 'group' ? 'Tambah delegasi' : 'Add participant' }}</h2><p class="subtitle">{{ participantFormMode === 'group' ? 'Beberapa nama dalam satu delegasi share 1 QR - sekali scan absen semua.' : 'Create a QR token automatically for this guest.' }}</p><div class="mode-toggle"><button type="button" :class="{ active: participantFormMode === 'single' }" @click="participantFormMode = 'single'">1 nama</button><button type="button" :class="{ active: participantFormMode === 'group' }" @click="participantFormMode = 'group'">Delegasi (multi nama)</button></div><template v-if="participantFormMode === 'single'"><label>Full name<input v-model="participantForm.name" required placeholder="e.g. Raka Pratama" /></label></template><template v-else><div class="group-names-editor"><label v-for="(_, idx) in participantForm.names" :key="idx">Nama {{ idx + 1 }}<div class="name-row"><input v-model="participantForm.names[idx]" :required="idx < 2" :placeholder="idx === 0 ? 'e.g. Edwin Sugianto' : 'e.g. I Dewa Putu Sidan Bayupati'" /><button v-if="participantForm.names.length > 2" type="button" class="icon-btn delete" @click="removeGroupNameField(idx)" title="Hapus nama"><X :size="14" /></button></div></label><button type="button" class="select-button" @click="addGroupNameField"><Plus :size="14" /> Tambah nama</button></div></template><label>Company<select v-model="participantForm.vendor_id"><option :value="null">Select company</option><option v-for="vendor in vendors" :key="vendor.id" :value="vendor.id">{{ vendor.company_name }}</option></select></label><label>Position<input v-model="participantForm.position" placeholder="Vendor representative" /></label><label>Phone<input v-model="participantForm.phone" placeholder="08xx" /></label><label>Email<input v-model="participantForm.email" type="email" placeholder="email@company.com" /></label><label>Table<select v-model="participantForm.table_id"><option :value="null">No table assigned</option><option v-for="tbl in tables" :key="tbl.id" :value="tbl.id">{{ tbl.table_label || tbl.table_number }} ({{ tbl.zone || 'No zone' }})</option></select></label><label>Seat number<input v-model.number="participantForm.seat_number" type="number" min="1" placeholder="e.g. 3" /></label><button class="primary-button full" type="submit"><Plus :size="17" /> {{ participantFormMode === 'group' ? 'Buat QR delegasi' : 'Create participant' }}</button></form></div>
+    <div v-if="showQrModal" class="modal-backdrop" @click.self="closeQrModal"><div class="modal qr-modal"><button type="button" class="modal-close" @click="closeQrModal"><X :size="18" /></button><p class="eyebrow">{{ qrParticipant?.is_group ? 'QR Delegasi' : 'QR Code' }}</p><h2>{{ qrParticipant?.is_group ? `Delegasi ${qrParticipant?.group_size} orang` : qrParticipant?.name }}</h2><p class="subtitle">{{ qrParticipant?.company_name }} &bull; Token: <code>{{ qrParticipant?.qr_token?.slice(0, 12) }}...</code></p><ul v-if="qrParticipant?.is_group" class="group-name-list modal-group-list"><li v-for="(n, i) in qrParticipant.group_names" :key="i">{{ n }}</li></ul><div class="qr-preview"><div v-if="qrLoading" class="qr-loading"><RefreshCw :size="28" class="spin" /><span>Generating QR Code...</span></div><img v-else-if="qrImageUrl" :src="qrImageUrl" :alt="`QR Code ${qrParticipant?.name}`" /></div><div class="qr-actions"><button class="primary-button" @click="downloadQr"><Download :size="17" /> Download PNG</button><button class="select-button" @click="closeQrModal">Tutup</button></div></div></div>
+    <div v-if="showEditForm" class="modal-backdrop" @click.self="showEditForm = false"><form class="modal" @submit.prevent="saveEdit"><button type="button" class="modal-close" @click="showEditForm = false"><X :size="18" /></button><p class="eyebrow">Edit data</p><h2>{{ editForm.is_group ? 'Edit delegasi' : 'Edit participant' }}</h2><p class="subtitle">{{ editForm.is_group ? 'Ubah nama anggota dan data bersama. QR delegasi tetap sama.' : 'Update participant information.' }}</p><template v-if="editForm.is_group"><div class="group-names-editor"><label v-for="(_, idx) in editForm.names" :key="idx">Nama {{ idx + 1 }}<div class="name-row"><input v-model="editForm.names[idx]" :required="idx < 2" placeholder="Nama anggota" /><button v-if="editForm.names.length > 2" type="button" class="icon-btn delete" @click="removeEditGroupNameField(idx)" title="Hapus nama"><X :size="14" /></button></div></label><button type="button" class="select-button" @click="addEditGroupNameField"><Plus :size="14" /> Tambah nama</button></div></template><template v-else><label>Full name<input v-model="editForm.name" required placeholder="Full name" /></label></template><label>Company<select v-model="editForm.vendor_id"><option :value="null">Select company</option><option v-for="vendor in vendors" :key="vendor.id" :value="vendor.id">{{ vendor.company_name }}</option></select></label><label>Table<select v-model="editForm.table_id"><option :value="null">No table assigned</option><option v-for="tbl in tables" :key="tbl.id" :value="tbl.id">{{ tbl.table_label || tbl.table_number }} ({{ tbl.zone || 'No zone' }})</option></select></label><label>Seat number<input v-model.number="editForm.seat_number" type="number" min="1" placeholder="e.g. 3" /></label><label>Position<input v-model="editForm.position" placeholder="Position" /></label><label>Phone<input v-model="editForm.phone" placeholder="08xx" /></label><label>Email<input v-model="editForm.email" type="email" placeholder="email@company.com" /></label><button class="primary-button full" type="submit"><Check :size="17" /> Save changes</button></form></div>
+    <div v-if="showDeleteConfirm" class="modal-backdrop" @click.self="showDeleteConfirm = false"><div class="modal modal-sm"><button type="button" class="modal-close" @click="showDeleteConfirm = false"><X :size="18" /></button><p class="eyebrow">Konfirmasi</p><h2>{{ deleteTarget?.is_group && deleteWholeDelegasi ? 'Hapus delegasi?' : 'Hapus peserta?' }}</h2><p class="subtitle" v-if="deleteTarget?.is_group && deleteWholeDelegasi">Seluruh anggota ({{ (deleteTarget.group_names || []).join(', ') }}) akan dihapus. QR bersama ikut hilang.</p><p class="subtitle" v-else>{{ deleteTarget?.name }} akan dihapus secara permanen dari event ini.</p><label v-if="deleteTarget?.is_group" class="toggle-label delete-scope"><input type="checkbox" v-model="deleteWholeDelegasi" /><span>Hapus seluruh delegasi</span></label><div class="qr-actions"><button class="primary-button danger" @click="doDelete"><Trash2 :size="17" /> Hapus</button><button class="select-button" @click="showDeleteConfirm = false">Batal</button></div></div></div>
+    <div v-if="showUndoConfirm" class="modal-backdrop" @click.self="showUndoConfirm = false"><div class="modal modal-sm"><button type="button" class="modal-close" @click="showUndoConfirm = false"><X :size="18" /></button><p class="eyebrow">Konfirmasi</p><h2>{{ undoTarget?.is_group ? 'Undo check-in delegasi?' : 'Undo check-in?' }}</h2><p class="subtitle" v-if="undoTarget?.is_group">Status kehadiran seluruh anggota ({{ (undoTarget.group_names || []).join(', ') }}) akan dikembalikan ke belum hadir.</p><p class="subtitle" v-else>Status kehadiran {{ undoTarget?.name }} akan dikembalikan ke belum hadir.</p><div class="qr-actions"><button class="primary-button" @click="doUndo"><Undo2 :size="17" /> Undo check-in</button><button class="select-button" @click="showUndoConfirm = false">Batal</button></div></div></div>
+    <div v-if="showImportPreview" class="modal-backdrop" @click.self="showImportPreview = false"><div class="modal modal-lg"><button type="button" class="modal-close" @click="showImportPreview = false"><X :size="18" /></button><p class="eyebrow">Import preview</p><h2>Preview data import</h2><p class="subtitle">{{ importPreview?.total_rows }} baris ditemukan &middot; {{ importPreview?.errors?.length || 0 }} peringatan &middot; {{ importPreview?.new_vendors?.length || 0 }} vendor baru &middot; {{ importPreview?.new_tables?.length || 0 }} meja baru &middot; {{ (importPreview?.delegasi_groups || []).filter(g => g.jumlah >= 2).length }} delegasi</p><div v-if="importPreview?.errors?.length" class="import-errors"><div v-for="(err, i) in importPreview.errors" :key="i" class="scan-result error"><CircleAlert :size="16" /><span>{{ typeof err === 'string' ? err : (err.row !== '-' ? `Baris ${err.row}: ${err.error}` : err.error) }}</span></div></div><div v-if="(importPreview?.delegasi_groups || []).some(g => g.jumlah >= 2)" class="import-delegasi-summary"><p class="eyebrow">Delegasi (share 1 QR)</p><ul><li v-for="g in importPreview.delegasi_groups.filter(x => x.jumlah >= 2)" :key="g.kode"><strong>{{ g.kode }}</strong> — {{ g.jumlah }} orang: {{ g.nama.join(', ') }}</li></ul></div><div class="table-wrap" style="max-height:300px;overflow-y:auto"><table><thead><tr><th>Nama</th><th>Perusahaan</th><th>Telepon</th><th>Email</th><th>Meja</th><th>Kursi</th><th>Delegasi</th></tr></thead><tbody><tr v-for="(row, i) in (importPreview?.rows || []).slice(0, 50)" :key="i" :class="{ 'is-delegasi-row': !!row.delegasi }"><td>{{ row.nama }}</td><td>{{ row.perusahaan || '&mdash;' }}</td><td>{{ row.telepon || '&mdash;' }}</td><td>{{ row.email || '&mdash;' }}</td><td>{{ row.nomor_meja || '&mdash;' }}</td><td>{{ row.nomor_kursi || '&mdash;' }}</td><td>{{ row.delegasi || '&mdash;' }}</td></tr></tbody></table></div><div class="import-actions"><label>Duplikat:<select v-model="importDuplicateAction"><option value="skip">Lewati</option><option value="update">Perbarui</option></select></label><div class="qr-actions"><button class="primary-button" @click="confirmImport" :disabled="importLoading"><Check :size="17" /> {{ importLoading ? 'Importing...' : 'Confirm import' }}</button><button class="select-button" @click="showImportPreview = false">Batal</button></div></div></div></div>
     <div v-if="showTableForm" class="modal-backdrop" @click.self="showTableForm = false"><form class="modal" @submit.prevent="addTable"><button type="button" class="modal-close" @click="showTableForm = false"><X :size="18" /></button><p class="eyebrow">New table</p><h2>Add table</h2><p class="subtitle">Add a single table to the seating plan.</p><label>Table number<input v-model="tableForm.table_number" required placeholder="e.g. A1" /></label><label>Label (optional)<input v-model="tableForm.table_label" placeholder="e.g. VIP Table 1" /></label><label>Capacity<input v-model.number="tableForm.capacity" type="number" min="1" required /></label><label>Zone (optional)<input v-model="tableForm.zone" placeholder="e.g. VIP, Regular" /></label><button class="primary-button full" type="submit"><Plus :size="17" /> Create table</button></form></div>
     <div v-if="showBulkForm" class="modal-backdrop" @click.self="showBulkForm = false"><form class="modal" @submit.prevent="bulkCreateTables"><button type="button" class="modal-close" @click="showBulkForm = false"><X :size="18" /></button><p class="eyebrow">Bulk create</p><h2>Bulk create tables</h2><p class="subtitle">Generate multiple tables with a prefix and numbering.</p><label>Prefix<input v-model="bulkForm.prefix" required placeholder="e.g. A" /></label><label>Count<input v-model.number="bulkForm.count" type="number" min="1" required /></label><label>Capacity per table<input v-model.number="bulkForm.capacity" type="number" min="1" required /></label><label>Zone (optional)<input v-model="bulkForm.zone" placeholder="e.g. VIP, Regular" /></label><button class="primary-button full" type="submit"><Plus :size="17" /> Create {{ bulkForm.count }} tables</button></form></div>
 
@@ -708,6 +1332,12 @@ onMounted(() => {
 .primary-button.danger:hover{background:#b71c1c}
 .import-errors{margin-bottom:14px;display:flex;flex-direction:column;gap:6px}
 .import-errors .scan-result{padding:8px 12px;font-size:12px}
+.import-delegasi-summary{margin-bottom:14px;padding:12px 14px;background:#e8f4fd;border-radius:10px;border:1px solid #bbdefb}
+.import-delegasi-summary .eyebrow{margin-bottom:6px}
+.import-delegasi-summary ul{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.import-delegasi-summary li{font-size:13px;color:#172a3a}
+.import-delegasi-summary strong{color:#1565c0}
+.is-delegasi-row td{background:#f5faff}
 .import-actions{display:flex;align-items:center;justify-content:space-between;margin-top:16px;gap:12px;flex-wrap:wrap}
 .import-actions label{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:500}
 .import-actions select{padding:6px 10px;border:1px solid #d7dfe6;border-radius:7px;font-size:13px}
@@ -756,4 +1386,154 @@ onMounted(() => {
 .stat-row{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;background:#f8fafb;border-radius:8px;font-size:13px}
 .stat-row span{text-transform:capitalize;color:#546e7a}
 .stat-row strong{color:#172a3a}
+
+.mode-toggle{display:flex;gap:6px;margin:4px 0 6px;background:#f0f4f8;border-radius:9px;padding:4px}
+.mode-toggle button{flex:1;border:0;background:transparent;border-radius:7px;padding:9px 10px;font-size:12px;font-weight:600;color:#546e7a;transition:all .15s}
+.mode-toggle button.active{background:#fff;color:#172a3a;box-shadow:0 1px 4px rgba(0,0,0,.08)}
+.group-names-editor{display:flex;flex-direction:column;gap:4px;margin-top:4px}
+.group-names-editor .name-row{display:flex;gap:8px;align-items:center}
+.group-names-editor .name-row input{flex:1}
+.group-names-editor .select-button{align-self:flex-start;margin-top:8px}
+.person-meta{display:flex;flex-direction:column;gap:3px;align-items:flex-start}
+.group-badge{display:inline-flex;align-items:center;font-size:9px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;background:#e8f4fd;color:#1565c0;padding:2px 7px;border-radius:10px}
+.wakil-badge{display:inline-flex;align-items:center;font-size:10px;font-weight:600;background:#fff3e0;color:#e65100;padding:2px 8px;border-radius:10px;margin-top:2px}
+.checkin-card.preview{background:linear-gradient(180deg,#fffdf8 0%,#fff7ed 100%);border:1px solid #fdba74;box-shadow:0 10px 28px rgba(234,88,12,.12)}
+.checkin-footer{padding:16px 18px 18px;border-top:1px solid rgba(0,0,0,.06);background:rgba(255,255,255,.55)}
+.checkin-footer.compact{display:flex;justify-content:center}
+.confirm-prompt{margin:0 0 12px;font-size:13px;font-weight:600;color:#172a3a;text-align:center}
+.checkin-confirm-actions{display:flex;flex-direction:column;gap:8px}
+.checkin-confirm-actions .primary-button,.checkin-confirm-actions .select-button{width:100%;justify-content:center}
+.wakil-btn{border-color:#fdba74!important;color:#c2410c!important;background:#fff7ed!important}
+.wakil-btn:hover{background:#ffedd5!important}
+.cancel-link{justify-content:center;width:100%;padding:8px;font-size:12px}
+.wakil-form{display:flex;flex-direction:column;gap:10px;text-align:left}
+.wakil-form label{display:flex;flex-direction:column;gap:5px;font-size:11px;font-weight:600;color:#64748b}
+.wakil-form input{padding:11px 12px;border:1px solid #d7dfe6;border-radius:8px;font-size:14px;font-weight:500;color:#172a3a;background:#fff}
+.wakil-form input:focus{outline:none;border-color:#e86b4f;box-shadow:0 0 0 3px #e86b4f18}
+.wakil-member-fields{display:grid;gap:9px}.wakil-member-fields label{padding:9px;border:1px solid #f2e6d2;border-radius:9px;background:#fffaf1}.wakil-member-fields label>span{color:#172a3a;font-size:11px;font-weight:700}.wakil-member-fields input{margin-top:5px;width:100%}
+.panel-actions{flex-wrap:wrap;justify-content:flex-end}
+.quick-person .person div{min-width:0}
+.quick-person .person div strong,
+.quick-person .person div span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px}
+.quick-person .person-avatar{flex-shrink:0;display:grid;place-items:center;overflow:hidden;line-height:1}
+.group-name-list{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-direction:column;gap:6px;text-align:left}
+.group-name-list li{font-size:13px;font-weight:600;color:#172a3a;background:rgba(255,255,255,.65);border-radius:8px;padding:8px 12px;border:1px solid rgba(0,0,0,.05)}
+.modal-group-list{margin:0 0 16px;text-align:left}
+.modal-group-list li{background:#f8fafb}
+.delete-scope{justify-content:center;margin:14px 0 4px}
+
+.expand-btn{border:0;background:transparent;padding:2px;display:inline-flex;align-items:center;justify-content:center;color:#8da5b9;border-radius:6px;cursor:pointer;flex-shrink:0}
+.expand-btn:hover{background:#eef3f7;color:#172a3a}
+.expand-btn svg{transition:transform .18s ease}
+.expand-btn svg.open{transform:rotate(180deg)}
+.expand-spacer{width:20px;flex-shrink:0}
+.invite-row.is-delegasi td{background:#fafcfd}
+.invite-row.is-expanded td{border-bottom-color:transparent}
+.delegasi-member-row td{background:#f5f8fa;padding-top:8px;padding-bottom:8px}
+.member-person{opacity:.95}
+.muted-cell{color:#8da5b9}
+.shared-qr-hint{font-size:10px;color:#9aa8b3;font-weight:600;letter-spacing:.3px;text-transform:uppercase}
+.participants-table{width:100%;table-layout:fixed;border-collapse:collapse}
+.participants-table thead th{
+  background:#f4f7fa;
+  color:#8da5b9;
+  font-size:10px;
+  font-weight:700;
+  letter-spacing:.6px;
+  text-transform:uppercase;
+  padding:12px 12px;
+  text-align:left;
+  border-bottom:1px solid #e8edf2;
+}
+.participants-table tbody td{
+  padding:12px;
+  vertical-align:middle;
+  border-top:1px solid #f0f2f3;
+  color:#526572;
+  font-size:12px;
+}
+.participants-table th:nth-child(1),.participants-table td:nth-child(1){width:24%}
+.participants-table th:nth-child(2),.participants-table td:nth-child(2){width:16%}
+.participants-table th:nth-child(3),.participants-table td:nth-child(3){width:14%}
+.participants-table th:nth-child(4),.participants-table td:nth-child(4){width:12%}
+.participants-table th:nth-child(5),.participants-table td:nth-child(5){width:10%}
+.participants-table th:nth-child(6),.participants-table td:nth-child(6){width:10%}
+.participants-table th:nth-child(7),.participants-table td:nth-child(7){width:14%}
+.participants-table .person{gap:8px;min-width:0}
+.participants-table .person-meta{min-width:0;max-width:100%}
+.participants-table .person-meta strong{
+  display:block;
+  overflow:hidden;
+  text-overflow:ellipsis;
+  white-space:nowrap;
+  max-width:220px;
+}
+.participants-table .action-buttons{flex-wrap:wrap;gap:6px}
+@media(max-width:900px){
+  .participants-table{min-width:0!important;table-layout:auto}
+  .participants-table th:nth-child(n),.participants-table td:nth-child(n){width:auto}
+  .participants-wrap{border:0!important;overflow:visible!important;margin-top:14px}
+  .participants-table thead{display:none}
+  .participants-table,.participants-table tbody{display:block;width:100%}
+  .participants-table tbody{display:flex;flex-direction:column;gap:10px}
+  .participants-table tr.invite-row,
+  .participants-table tr.delegasi-member-row{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:8px 12px;
+    padding:14px;
+    border:1px solid #e8edf1;
+    border-radius:12px;
+    background:#fff;
+    box-shadow:0 2px 8px rgba(16,42,67,.04);
+  }
+  .participants-table tr.delegasi-member-row{background:#f7fafc;margin-left:8px;border-style:dashed}
+  .participants-table tr.invite-row td,
+  .participants-table tr.delegasi-member-row td,
+  .invite-row.is-delegasi td,
+  .delegasi-member-row td{
+    display:block;
+    width:auto!important;
+    min-width:0!important;
+    padding:0!important;
+    border:0!important;
+    background:transparent!important;
+    white-space:normal!important;
+    overflow:visible!important;
+    text-overflow:unset!important;
+  }
+  .participants-table td:first-child{grid-column:1 / -1}
+  .participants-table td:last-child{grid-column:1 / -1;padding-top:8px!important;margin-top:4px;border-top:1px solid #eef2f5!important}
+  .participants-table td[data-label]::before{
+    content:attr(data-label);
+    display:block;
+    margin-bottom:3px;
+    font-size:9px;
+    font-weight:700;
+    letter-spacing:.5px;
+    text-transform:uppercase;
+    color:#9aa8b3;
+  }
+  .participants-table td:first-child::before{display:none}
+  .participants-table .person-meta strong{max-width:100%;white-space:normal;overflow:visible;text-overflow:unset}
+  .participants-table .action-buttons{justify-content:flex-start}
+  .panel-actions{width:100%;justify-content:stretch}
+  .panel-actions > *{flex:1 1 calc(50% - 6px);min-width:140px}
+  .panel-actions .select-button,.panel-actions .primary-button,.panel-actions .import-btn{justify-content:center;width:100%}
+  .panel-actions .export-wrap{flex:1 1 calc(50% - 6px)}
+  .panel-actions .export-wrap > button{width:100%;justify-content:center}
+  .quick-person .person div strong,
+  .quick-person .person div span{max-width:none;white-space:normal}
+}
+@media(max-width:650px){
+  .participants-table tr.invite-row,
+  .participants-table tr.delegasi-member-row{grid-template-columns:1fr}
+  .panel-actions{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .panel-actions > *,.panel-actions .export-wrap{flex:none;min-width:0;width:100%}
+  .checkin-confirm-actions .primary-button,
+  .checkin-confirm-actions .select-button{min-height:44px}
+  .camera-controls{flex-wrap:wrap}
+  .camera-toggle{flex:1 1 calc(50% - 5px);justify-content:center}
+}
+
 </style>

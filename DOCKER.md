@@ -1,13 +1,10 @@
-# Docker Deployment (Local)
+# Docker Deployment (Production)
 
-Deployment lokal memakai Docker Compose dengan:
+Deployment production memakai Docker Compose dengan:
 
 - PostgreSQL 16, hanya di jaringan internal Docker.
-- FastAPI backend, dipublish ke host pada `127.0.0.1` saja.
-- Vue frontend (static via Nginx), dipublish ke host pada `127.0.0.1` saja.
-- Nginx proxy lokal dengan HTTPS self-signed pada port non-default.
-
-Service hanya bisa diakses dari mesin lokal (`127.0.0.1`).
+- FastAPI backend dan Vue frontend hanya tersedia melalui proxy.
+- Nginx proxy HTTPS sebagai satu-satunya endpoint publik.
 
 ## Prasyarat
 
@@ -24,10 +21,11 @@ Edit `.env` dan isi minimal:
 ```dotenv
 POSTGRES_PASSWORD=gunakan_password_random_panjang
 JWT_SECRET=gunakan_secret_random_panjang_lain
-BACKEND_PORT=18081
-FRONTEND_PORT=18082
+PUBLIC_BIND_IP=127.0.0.1
 HTTPS_PORT=18443
-CORS_ORIGINS=http://127.0.0.1:18082,http://localhost:18082,https://127.0.0.1:18443,https://localhost:18443
+CORS_ORIGINS=https://domain-anda.com
+INITIAL_ADMIN_EMAIL=admin@domain-anda.com
+INITIAL_ADMIN_PASSWORD=gunakan_password_admin_random_panjang
 ```
 
 Generate secret:
@@ -48,12 +46,10 @@ docker compose ps
 
 Akses:
 
-- HTTPS (utama): `https://127.0.0.1:18443` (sertifikat self-signed — browser akan meminta konfirmasi)
-- Frontend HTTP: `http://127.0.0.1:18082`
-- API health: `http://127.0.0.1:18081/api/health` atau `https://127.0.0.1:18443/api/health`
-- Swagger: `https://127.0.0.1:18443/docs`
+- HTTPS: domain publik yang dikonfigurasi pada proxy.
+- API health: `https://domain-anda.com/api/health`
 
-Port host bisa diganti lewat `BACKEND_PORT` / `FRONTEND_PORT` / `HTTPS_PORT` di `.env`. Binding selalu ke `127.0.0.1` (bukan `0.0.0.0`), jadi tidak terbuka ke jaringan luar.
+Reverse proxy host diarahkan ke `https://127.0.0.1:18443`. Port ini hanya bind ke loopback dan tidak dapat diakses langsung dari jaringan luar. Backend dan frontend tidak dipublish langsung ke host.
 
 ## Operasional
 
