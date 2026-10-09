@@ -144,6 +144,7 @@ class UserUpdateInput(BaseModel):
     email: str = Field(min_length=5, max_length=255)
     role: str = "operator"
     is_active: bool = True
+    password: str | None = Field(default=None, min_length=6, max_length=100)
 
 class PasswordChangeInput(BaseModel):
     current_password: str
@@ -401,6 +402,8 @@ def update_user(user_id: int, payload: UserUpdateInput, db: Session = Depends(ge
     target.email = payload.email.lower().strip()
     target.role = payload.role
     target.is_active = payload.is_active
+    if payload.password:
+        target.password_hash = hash_password(payload.password)
     db.commit()
     db.refresh(target)
     return {"id": target.id, "name": target.name, "email": target.email, "role": target.role, "is_active": target.is_active}

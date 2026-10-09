@@ -89,7 +89,7 @@ const usersList = ref([])
 const showUserForm = ref(false)
 const showEditUserForm = ref(false)
 const userForm = ref({ name: '', email: '', password: '', role: 'operator' })
-const editUserForm = ref({ id: null, name: '', email: '', role: 'operator', is_active: true })
+const editUserForm = ref({ id: null, name: '', email: '', role: 'operator', is_active: true, password: '' })
 const showDeactivateConfirm = ref(false)
 const deactivateTarget = ref(null)
 const showResetPasswordModal = ref(false)
@@ -655,13 +655,14 @@ async function addUser() {
   } catch (error) { scanMessage.value = { type: 'error', title: 'Error', text: error.message } }
 }
 function openEditUser(u) {
-  editUserForm.value = { id: u.id, name: u.name, email: u.email, role: u.role, is_active: u.is_active }
+  editUserForm.value = { id: u.id, name: u.name, email: u.email, role: u.role, is_active: u.is_active, password: '' }
   showEditUserForm.value = true
 }
 async function saveEditUser() {
   if (!editUserForm.value.name.trim()) return
   try {
-    const { id, ...body } = editUserForm.value
+    const { id, password, ...body } = editUserForm.value
+    if (password.trim()) body.password = password
     await api(`/users/${id}`, { method: 'PUT', body: JSON.stringify(body) })
     showEditUserForm.value = false
     await loadUsers()
@@ -1281,7 +1282,7 @@ onMounted(() => {
     <div v-if="showUserForm" class="modal-backdrop" @click.self="showUserForm = false"><form class="modal" @submit.prevent="addUser"><button type="button" class="modal-close" @click="showUserForm = false"><X :size="18" /></button><p class="eyebrow">New user</p><h2>Add user</h2><p class="subtitle">Create a new user account.</p><label>Full name<input v-model="userForm.name" required placeholder="e.g. John Doe" /></label><label>Email<input v-model="userForm.email" type="email" required placeholder="user@company.com" /></label><label>Password<input v-model="userForm.password" type="password" required placeholder="Minimum 6 characters" /></label><label>Role<select v-model="userForm.role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option><option v-if="isSuperadmin" value="superadmin">Superadmin</option></select></label><button class="primary-button full" type="submit"><UserPlus :size="17" /> Create user</button></form></div>
 
     <!-- Edit User Modal -->
-    <div v-if="showEditUserForm" class="modal-backdrop" @click.self="showEditUserForm = false"><form class="modal" @submit.prevent="saveEditUser"><button type="button" class="modal-close" @click="showEditUserForm = false"><X :size="18" /></button><p class="eyebrow">Edit user</p><h2>Edit user</h2><p class="subtitle">Update user information.</p><label>Full name<input v-model="editUserForm.name" required placeholder="Full name" /></label><label>Email<input v-model="editUserForm.email" type="email" required placeholder="email@company.com" /></label><label>Role<select v-model="editUserForm.role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option><option v-if="isSuperadmin" value="superadmin">Superadmin</option></select></label><label class="toggle-label"><span>Active</span><input type="checkbox" v-model="editUserForm.is_active" /><span :class="['toggle-indicator', { active: editUserForm.is_active }]">{{ editUserForm.is_active ? 'Yes' : 'No' }}</span></label><button class="primary-button full" type="submit"><Check :size="17" /> Save changes</button></form></div>
+     <div v-if="showEditUserForm" class="modal-backdrop" @click.self="showEditUserForm = false"><form class="modal" @submit.prevent="saveEditUser"><button type="button" class="modal-close" @click="showEditUserForm = false"><X :size="18" /></button><p class="eyebrow">Edit user</p><h2>Edit user</h2><p class="subtitle">Update user information and optionally set a new password.</p><label>Full name<input v-model="editUserForm.name" required placeholder="Full name" /></label><label>Email<input v-model="editUserForm.email" type="email" required placeholder="email@company.com" /></label><label>New password<input v-model="editUserForm.password" type="password" minlength="6" autocomplete="new-password" placeholder="Leave blank to keep current password" /></label><label>Role<select v-model="editUserForm.role"><option value="viewer">Viewer</option><option value="operator">Operator</option><option value="admin">Admin</option><option v-if="isSuperadmin" value="superadmin">Superadmin</option></select></label><label class="toggle-label"><span>Active</span><input type="checkbox" v-model="editUserForm.is_active" /><span :class="['toggle-indicator', { active: editUserForm.is_active }]">{{ editUserForm.is_active ? 'Yes' : 'No' }}</span></label><button class="primary-button full" type="submit"><Check :size="17" /> Save changes</button></form></div>
 
     <!-- Deactivate User Confirm -->
     <div v-if="showDeactivateConfirm" class="modal-backdrop" @click.self="showDeactivateConfirm = false"><div class="modal modal-sm"><button type="button" class="modal-close" @click="showDeactivateConfirm = false"><X :size="18" /></button><p class="eyebrow">Confirm</p><h2>Deactivate user?</h2><p class="subtitle">{{ deactivateTarget?.name }} will be deactivated and can no longer sign in.</p><div class="qr-actions"><button class="primary-button danger" @click="doDeactivate"><Power :size="17" /> Deactivate</button><button class="select-button" @click="showDeactivateConfirm = false">Cancel</button></div></div></div>

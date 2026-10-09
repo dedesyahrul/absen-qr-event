@@ -212,6 +212,28 @@ Periksa melalui browser:
 
 Swagger, ReDoc, dan OpenAPI dinonaktifkan ketika `APP_ENV=production`.
 
+## Seeder Data Demo
+
+Seeder tidak berjalan otomatis saat startup dan tidak membuat akun admin. Gunakan hanya untuk verifikasi deployment atau demo internal.
+
+Buat dataset demo yang terisolasi:
+
+```bash
+docker compose exec backend python -m app.seed
+```
+
+Seeder aman dijalankan ulang. Jika dataset dengan nama marker yang sama sudah ada, tidak ada data baru yang dibuat.
+
+Dataset berisi 10 peserta dengan data perusahaan, jabatan, kontak, meja, dan QR yang realistis. Dua grup delegasi juga disediakan: satu grup berisi tiga peserta dan satu grup berisi dua peserta. Sebagian peserta sudah check-in, sebagian belum, dan beberapa check-in tercatat sebagai kehadiran melalui wakil agar alur operasional dapat diuji seperti event nyata.
+
+Hapus hanya dataset demo:
+
+```bash
+docker compose exec backend python -m app.seed --remove
+```
+
+Seeder menggunakan event `Vendor Partnership Summit 2026` dengan marker internal `[seed:vendor-partnership-2026]`. Jalankan `python -m app.seed` kembali jika ingin menyegarkan seluruh dataset seed tersebut. Jangan gunakan seeder ini untuk data event production nyata. Backup database sebelum membuat atau menghapus dataset.
+
 ## Update Versi
 
 Backup database sebelum update:
