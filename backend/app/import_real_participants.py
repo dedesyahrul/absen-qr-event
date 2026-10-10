@@ -12,6 +12,7 @@ from .database import SessionLocal, init_database
 from .models import AttendanceLog, Event, Participant, Table, Vendor
 
 
+REAL_DATA_DESCRIPTION = "Real participant data imported from docs/all-participants.md"
 COMPANY_ROW = re.compile(r"^\s*(.*?)\s+-\s+(.+?)\s*$")
 PERSON = re.compile(r"(?:^|\s)(\d+)\.\s*(.*?)(?=\s+\d+\.\s*|$)")
 BLANK = re.compile(r"\[?\s*blank\s*\]?|kosong|hanya 1 PIC", re.IGNORECASE)
@@ -58,6 +59,11 @@ def import_real_data(path: Path) -> tuple[int, int, int]:
         event = db.scalar(select(Event).order_by(Event.id).limit(1))
         if not event:
             raise RuntimeError("No event exists in the database")
+        if event.description == REAL_DATA_DESCRIPTION:
+            participants = db.query(Participant).filter(Participant.event_id == event.id).count()
+            vendors = db.query(Vendor).filter(Vendor.event_id == event.id).count()
+            tables = db.query(Table).filter(Table.event_id == event.id).count()
+            return participants, vendors, tables
 
         db.execute(delete(AttendanceLog).where(AttendanceLog.event_id == event.id))
         db.execute(delete(Participant).where(Participant.event_id == event.id))
@@ -122,12 +128,15 @@ def import_real_data(path: Path) -> tuple[int, int, int]:
         db.add_all(participants)
 
         event.name = "Vendor Gathering 2026"
-        event.description = "Real participant data imported from docs/All participants.md"
+        event.description = REAL_DATA_DESCRIPTION
         return len(participants), len(vendors), len(tables)
 
 
 def main() -> None:
-    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("docs/All participants.md")
+    path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("docs/all-participants.md")
+    if path.is_dir():
+        candidates = [path / "All participants.md", path / "docs" / "All participants.md"]
+        path = next((candidate for candidate in candidates if candidate.is_file()), path)
     init_database()
     counts = import_real_data(path)
     print(f"Imported {counts[0]} participants, {counts[1]} vendors, {counts[2]} tables.")
