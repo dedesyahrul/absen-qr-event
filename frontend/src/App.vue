@@ -50,7 +50,7 @@ let qrScannerInstance = null
 
 // Edit participant state
 const showEditForm = ref(false)
-const editForm = ref({ id: null, is_group: false, qr_group_token: null, name: '', names: ['', ''], vendor_id: null, table_id: null, seat_number: null, position: '', phone: '', email: '' })
+const editForm = ref({ id: null, is_group: false, qr_group_token: null, name: '', names: ['', ''], additional_names: '', convert_to_group: false, vendor_id: null, table_id: null, seat_number: null, position: '', phone: '', email: '' })
 
 // Delete confirmation state
 const showDeleteConfirm = ref(false)
@@ -456,6 +456,8 @@ async function openEditForm(person) {
     qr_group_token: person.qr_group_token || null,
     name: person.name,
     names,
+    additional_names: '',
+    convert_to_group: false,
     vendor_id: person.vendor_id || null,
     table_id: person.table_id || null,
     seat_number: person.seat_number || null,
@@ -490,10 +492,19 @@ async function saveEdit() {
     })
   } else {
     if (!editForm.value.name.trim()) return
-    await api(`/events/${event.value.id}/participants/${editForm.value.id}`, {
-      method: 'PUT',
-      body: JSON.stringify({ name: editForm.value.name.trim(), ...shared }),
-    })
+    const extraNames = window.prompt('Nama anggota delegasi tambahan (pisahkan dengan koma, kosongkan jika tetap individual):', '') || ''
+    const names = [editForm.value.name.trim(), ...extraNames.split(',').map(n => n.trim()).filter(Boolean)]
+    if (names.length >= 2) {
+      await api(`/events/${event.value.id}/participants/${editForm.value.id}/convert-to-group`, {
+        method: 'POST',
+        body: JSON.stringify({ names: [editForm.value.name.trim(), ...names.slice(1)], ...shared }),
+      })
+    } else {
+      await api(`/events/${event.value.id}/participants/${editForm.value.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ name: editForm.value.name.trim(), ...shared }),
+      })
+    }
   }
   showEditForm.value = false
   await refreshEventData()
@@ -813,6 +824,26 @@ function delegasiStatusLabel(row) {
   if (row.allChecked) return `${row.checkedCount}/${row.groupSize} hadir`
   if (row.anyChecked) return `${row.checkedCount}/${row.groupSize} hadir`
   return `0/${row.groupSize} belum hadir`
+}
+async function convertToDelegasi(person) {
+  if (person.is_group || !event.value) return
+  const raw = window.prompt('Nama anggota tambahan, pisahkan dengan koma:', '')
+  if (!raw?.trim()) return
+  const names = [person.name, ...raw.split(',').map(name => name.trim()).filter(Boolean)]
+  if (names.length < 2) return
+  await api(`/events/${event.value.id}/participants/${person.id}/convert-to-group`, {
+    method: 'POST',
+    body: JSON.stringify({
+      names,
+      vendor_id: person.vendor_id,
+      table_id: person.table_id,
+      seat_number: null,
+      position: person.position || '',
+      phone: person.phone || '',
+      email: person.email || '',
+    }),
+  })
+  await refreshEventData()
 }
 function setWakilForMember(id, value) {
   wakilByParticipant.value = { ...wakilByParticipant.value, [id]: value }
@@ -1167,7 +1198,7 @@ onMounted(() => {
     <button v-else-if="row.type === 'delegasi' && !row.allChecked && canEdit" class="tiny-button" @click="checkIn('manual', row.primary.id)">Check in</button>
     <button v-if="(row.type === 'solo' ? row.primary.attendance_status === 'checked_in' : row.anyChecked) && canEdit" class="icon-btn undo" @click="confirmUndo(row.primary)" title="Undo check-in"><Undo2 :size="14" /></button>
     <span v-if="row.type === 'solo' && row.primary.attendance_status === 'checked_in'" class="muted">{{ new Date(row.primary.check_in_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' }) }}</span>
-    <button v-if="canEdit" class="icon-btn edit" @click="openEditForm(row.primary)" title="Edit"><Pencil :size="14" /></button>
+<button v-if="canEdit" class="icon-btn edit" @click="openEditForm(row.primary)" title="Edit"><Pencil :size="14" /></button><button v-if="row.type === 'solo' && canEdit" class="icon-btn" @click="convertToDelegasi(row.primary)" title="Jadikan delegasi"><Users :size="14" /></button>
     <button v-if="canManage" class="icon-btn delete" @click="confirmDelete(row.primary)" title="Hapus"><Trash2 :size="14" /></button>
   </div>
 </td>

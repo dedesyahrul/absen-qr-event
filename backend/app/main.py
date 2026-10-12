@@ -88,6 +88,15 @@ class GroupUpdateInput(BaseModel):
     phone: str = ""
     email: str = ""
 
+class ConvertParticipantGroupInput(BaseModel):
+    names: list[str] = Field(min_length=2)
+    vendor_id: int | None = None
+    table_id: int | None = None
+    seat_number: str | None = None
+    position: str = ""
+    phone: str = ""
+    email: str = ""
+
 class ScanInput(BaseModel):
     token: str = Field(min_length=4)
     notes: str = ""
@@ -758,6 +767,37 @@ def update_participant(event_id: int, participant_id: int, payload: ParticipantI
     db.commit()
     db.refresh(p)
     return serialize_participant(p, db)
+
+
+@app.post("/api/events/{event_id}/participants/{participant_id}/convert-to-group", tags=["Participants"])
+def convert_participant_to_group(event_id: int, participant_id: int, payload: ConvertParticipantGroupInput, db: Session = Depends(get_db), user: User = Depends(current_user)) -> dict:
+    p = db.scalar(select(Participant).where(Participant.id == participant_id, Participant.event_id == event_id))
+    if not p:
+        raise HTTPException(404, "Peserta tidak ditemukan")
+    if p.qr_group_token:
+        raise HTTPException(400, "Peserta sudah menjadi anggota delegasi")
+    _validate_group_refs(event_id, payload.vendor_id, payload.table_id, db)
+    names = _normalize_group_names(payload.names)
+    shared_token = p.qr_token
+    shared = payload.model_dump(exclude={"names"})
+    p.qr_group_token = shared_token
+    for key, value in shared.items():
+        setattr(p, key, value)
+    created = [p]
+    for name in names[1:]:
+        member = Participant(
+            event_id=event_id,
+            name=name,
+            qr_token=token_urlsafe(24),
+            qr_group_token=shared_token,
+            **shared,
+        )
+        db.add(member)
+        created.append(member)
+    db.commit()
+    for member in created:
+        db.refresh(member)
+    return _serialize_group(created, shared_token, db)
 
 
 @app.put("/api/events/{event_id}/participants/group/{group_token}", tags=["Participants"])
