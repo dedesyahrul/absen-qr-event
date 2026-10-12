@@ -1103,24 +1103,19 @@ def download_all_qr(event_id: int, db: Session = Depends(get_db), user: User = D
     seen_group_tokens: set[str] = set()
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zf:
         for p in participants_list:
+            vendor = db.get(Vendor, p.vendor_id) if p.vendor_id else None
+            company = safe_filename(vendor.company_name) if vendor else "Unassigned"
             members = group_members(p, db) if p.qr_group_token else [p]
             is_real_group = bool(p.qr_group_token) and len(members) > 1
             if is_real_group:
                 if p.qr_group_token in seen_group_tokens:
                     continue
                 seen_group_tokens.add(p.qr_group_token)
-                label = "_".join(safe_filename(m.name) for m in members[:3])
-                if len(members) > 3:
-                    label += f"_plus{len(members) - 3}"
                 token = p.qr_group_token
-                filename_suffix = f"delegasi_{label}"
             else:
                 token = p.qr_token
-                filename_suffix = f"{safe_filename(p.name)}_{p.id}"
             img_buffer = generate_qr_image(token)
-            vendor = db.get(Vendor, p.vendor_id) if p.vendor_id else None
-            company = safe_filename(vendor.company_name) if vendor else "Unassigned"
-            filename = f"{company}/{filename_suffix}.png"
+            filename = f"{company}/{company}.png"
             zf.writestr(filename, img_buffer.read())
     zip_buffer.seek(0)
     return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="qr_codes_{safe_filename(event.name)}.zip"'})
@@ -1134,12 +1129,10 @@ def get_participant_qr(event_id: int, participant_id: int, db: Session = Depends
     if not participant:
         raise HTTPException(404, "Peserta tidak ditemukan di event ini")
     buffer = generate_qr_image(effective_qr_token(participant))
+    vendor = db.get(Vendor, participant.vendor_id) if participant.vendor_id else None
+    company = safe_filename(vendor.company_name) if vendor else "Unassigned"
     members = group_members(participant, db)
-    if participant.qr_group_token and len(members) > 1:
-        label = "_".join(safe_filename(m.name) for m in members[:2])
-        filename = f"qr_delegasi_{label}.png"
-    else:
-        filename = f"qr_{safe_filename(participant.name)}_{participant.id}.png"
+    filename = f"qr_{company}.png"
     return StreamingResponse(buffer, media_type="image/png", headers={"Content-Disposition": f'inline; filename="{filename}"'})
 
 # ─── Import Excel ───────────────────────────────────────────────────────────────

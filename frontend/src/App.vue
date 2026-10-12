@@ -371,13 +371,11 @@ function downloadQr() {
   const link = document.createElement('a')
   link.href = qrImageUrl.value
   const p = qrParticipant.value
-  if (p.is_group) {
-    const label = (p.group_names || [p.name]).slice(0, 2).map(n => n.replace(/\s+/g, '_')).join('_')
-    link.download = `qr_delegasi_${label}.png`
-  } else {
-    link.download = `qr_${p.name.replace(/\s+/g, '_')}_${p.id}.png`
-  }
+  const company = (p.company_name || 'Unassigned').replace(/[^a-zA-Z0-9]+/g, '_').replace(/^_|_$/g, '')
+  link.download = `qr_${company}.png`
+  document.body.appendChild(link)
   link.click()
+  link.remove()
 }
 async function downloadAllQr() {
   if (!event.value || qrAllLoading.value) return
