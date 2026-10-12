@@ -41,7 +41,7 @@ services:
       context: .
       dockerfile: importer.Dockerfile
     container_name: absen-qr-real-data-import
-    command: ["python", "-m", "app.import_real_participants", "/input/all-participants.md"]
+    command: ["python", "-m", "app.import_real_participants", "/input/all-participants-update-01.md"]
     environment:
       APP_ENV: ${APP_ENV:-production}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-absen}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}@db:5432/${POSTGRES_DB:-absen_qr}

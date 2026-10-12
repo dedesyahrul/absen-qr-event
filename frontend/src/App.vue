@@ -41,6 +41,7 @@ const showQrModal = ref(false)
 const qrParticipant = ref(null)
 const qrImageUrl = ref('')
 const qrLoading = ref(false)
+const qrAllLoading = ref(false)
 
 // Camera scanner state
 const cameraActive = ref(false)
@@ -379,7 +380,9 @@ function downloadQr() {
   link.click()
 }
 async function downloadAllQr() {
-  if (!event.value) return
+  if (!event.value || qrAllLoading.value) return
+  qrAllLoading.value = true
+  scanMessage.value = { type: 'success', title: 'Menyiapkan QR Code', text: 'QR sedang dibuat dan dikemas menjadi ZIP. Mohon tunggu.' }
   try {
     const response = await fetch(`${API}/events/${event.value.id}/participants/qr-all`, { headers: { Authorization: `Bearer ${token.value}` } })
     if (!response.ok) {
@@ -391,8 +394,10 @@ async function downloadAllQr() {
     const link = document.createElement('a')
     link.href = url
     link.download = `qr_codes_${event.value.name.replace(/\s+/g, '_')}.zip`
+    document.body.appendChild(link)
     link.click()
-    URL.revokeObjectURL(url)
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
     const delegasiCount = participantRows.value.filter(r => r.type === 'delegasi').length
     const soloCount = participantRows.value.filter(r => r.type === 'solo').length
     scanMessage.value = {
@@ -400,7 +405,8 @@ async function downloadAllQr() {
       title: 'QR Code diunduh',
       text: `${soloCount} individual + ${delegasiCount} delegasi (1 QR per undangan) dalam ZIP.`,
     }
-  } catch (error) { scanMessage.value = { type: 'error', title: 'Error', text: error.message } }
+  } catch (error) { scanMessage.value = { type: 'error', title: 'Download QR gagal', text: error.message } }
+  finally { qrAllLoading.value = false }
 }
 
 // Camera scanner functions

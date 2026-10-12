@@ -6,4 +6,4 @@ COPY backend/requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY backend/app ./app
-COPY docs/all-participants.md /input/all-participants.md
+COPY docs/all-participants-update-01.md /input/all-participants-update-01.md
