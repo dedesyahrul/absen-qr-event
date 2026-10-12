@@ -61,6 +61,9 @@ class VendorInput(BaseModel):
     phone: str = ""
     email: str = ""
 
+class VendorTableMoveInput(BaseModel):
+    table_id: int
+
 class ParticipantInput(BaseModel):
     name: str = Field(min_length=2, max_length=150)
     vendor_id: int | None = None
@@ -596,6 +599,24 @@ def delete_vendor(event_id: int, vendor_id: int, db: Session = Depends(get_db), 
     db.delete(vendor)
     db.commit()
     return {"detail": "Vendor berhasil dihapus"}
+
+@app.put("/api/events/{event_id}/vendors/{vendor_id}/table", tags=["Vendors"])
+def move_vendor_table(event_id: int, vendor_id: int, payload: VendorTableMoveInput, db: Session = Depends(get_db), user: User = Depends(require_role("admin"))) -> dict:
+    vendor = db.scalar(select(Vendor).where(Vendor.id == vendor_id, Vendor.event_id == event_id))
+    table = db.scalar(select(Table).where(Table.id == payload.table_id, Table.event_id == event_id))
+    if not vendor:
+        raise HTTPException(404, "Vendor tidak ditemukan")
+    if not table:
+        raise HTTPException(404, "Meja tidak ditemukan")
+    participants = list(db.scalars(select(Participant).where(Participant.event_id == event_id, Participant.vendor_id == vendor_id)).all())
+    current_count = db.scalar(select(func.count(Participant.id)).where(Participant.event_id == event_id, Participant.table_id == table.id, Participant.vendor_id != vendor_id)) or 0
+    if current_count + len(participants) > table.capacity:
+        raise HTTPException(400, f"Meja {table.table_number} tidak cukup kapasitas ({current_count} + {len(participants)} dari {table.capacity})")
+    for participant in participants:
+        participant.table_id = table.id
+        participant.seat_number = None
+    db.commit()
+    return {"vendor_id": vendor_id, "vendor": vendor.company_name, "table_id": table.id, "table_number": table.table_number, "moved": len(participants), "qr_unchanged": True}
 
 # ─── Tables (Seating) CRUD ─────────────────────────────────────────────────────
 
