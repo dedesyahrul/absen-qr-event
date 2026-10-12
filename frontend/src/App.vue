@@ -344,7 +344,7 @@ function scanResultTitle(msg) {
   if (msg.isSubstitute) return msg.isGroup ? 'Wakil delegasi berhasil dicatat' : 'Wakil berhasil dicatat'
   return msg.isGroup ? 'Kehadiran delegasi berhasil dicatat' : 'Check-in berhasil'
 }
-function focusScanner() { activeView.value = 'scanner'; nextTick(() => document.querySelector('#scan-input')?.focus()) }
+function focusScanner() { activeView.value = 'scanner'; nextTick(() => document.querySelector('#scan-input input')?.focus()) }
 
 // QR Code functions
 async function showQr(person) {
@@ -593,8 +593,12 @@ async function exportFile(type) {
     const blob = await response.blob()
     const url = URL.createObjectURL(blob)
     const link = document.createElement('a')
-    link.href = url; link.download = `${type}_${event.value.name.replace(/\s+/g, '_')}.xlsx`; link.click()
-    URL.revokeObjectURL(url)
+    link.href = url
+    link.download = `${type}_${event.value.name.replace(/\s+/g, '_')}.xlsx`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch (error) { scanMessage.value = { type: 'error', title: 'Error', text: error.message } }
 }
 
@@ -924,7 +928,7 @@ onMounted(() => {
               </div>
               <div v-show="!checkinPreview" class="scan-form">
                 <label id="scan-input">Token QR
-                  <input v-model="scanToken" @keyup.enter="checkIn('qr')" placeholder="Tempel atau ketik token QR" autofocus />
+                  <input v-model="scanToken" @keyup.enter="checkIn('qr')" placeholder="Tempel atau ketik token QR" />
                 </label>
                 <button class="primary-button" @click="checkIn('qr')" :disabled="!scanToken.trim() || checkinSubmitting">
                   <Search :size="17" /> Preview

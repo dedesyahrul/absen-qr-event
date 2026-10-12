@@ -1118,7 +1118,15 @@ def download_all_qr(event_id: int, db: Session = Depends(get_db), user: User = D
             filename = f"{company}/{company}.png"
             zf.writestr(filename, img_buffer.read())
     zip_buffer.seek(0)
-    return StreamingResponse(zip_buffer, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="qr_codes_{safe_filename(event.name)}.zip"'})
+    zip_size = zip_buffer.getbuffer().nbytes
+    return StreamingResponse(
+        zip_buffer,
+        media_type="application/zip",
+        headers={
+            "Content-Length": str(zip_size),
+            "Content-Disposition": f'attachment; filename="qr_codes_{safe_filename(event.name)}.zip"',
+        },
+    )
 
 @app.get("/api/events/{event_id}/participants/{participant_id}/qr", tags=["QR Code"])
 def get_participant_qr(event_id: int, participant_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -1133,7 +1141,14 @@ def get_participant_qr(event_id: int, participant_id: int, db: Session = Depends
     company = safe_filename(vendor.company_name) if vendor else "Unassigned"
     members = group_members(participant, db)
     filename = f"qr_{company}.png"
-    return StreamingResponse(buffer, media_type="image/png", headers={"Content-Disposition": f'inline; filename="{filename}"'})
+    return StreamingResponse(
+        buffer,
+        media_type="image/png",
+        headers={
+            "Content-Length": str(buffer.getbuffer().nbytes),
+            "Content-Disposition": f'inline; filename="{filename}"',
+        },
+    )
 
 # ─── Import Excel ───────────────────────────────────────────────────────────────
 
@@ -1462,7 +1477,7 @@ def export_participants(event_id: int, db: Session = Depends(get_db), user: User
     ws.column_dimensions["J"].width = 40
     buf = _wb_to_bytes(wb)
     fn = f"peserta_{safe_filename(event.name)}.xlsx"
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Length": str(buf.getbuffer().nbytes), "Content-Disposition": f'attachment; filename="{fn}"'})
 
 @app.get("/api/events/{event_id}/export/attendance", tags=["Import/Export"])
 def export_attendance(event_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -1496,7 +1511,7 @@ def export_attendance(event_id: int, db: Session = Depends(get_db), user: User =
         ws.column_dimensions[col[0].column_letter].width = 20
     buf = _wb_to_bytes(wb)
     fn = f"kehadiran_{safe_filename(event.name)}.xlsx"
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Length": str(buf.getbuffer().nbytes), "Content-Disposition": f'attachment; filename="{fn}"'})
 
 @app.get("/api/events/{event_id}/export/vendors", tags=["Import/Export"])
 def export_vendors(event_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -1513,7 +1528,7 @@ def export_vendors(event_id: int, db: Session = Depends(get_db), user: User = De
         ws.column_dimensions[col[0].column_letter].width = 20
     buf = _wb_to_bytes(wb)
     fn = f"vendor_{safe_filename(event.name)}.xlsx"
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Length": str(buf.getbuffer().nbytes), "Content-Disposition": f'attachment; filename="{fn}"'})
 
 @app.get("/api/events/{event_id}/export/seating", tags=["Import/Export"])
 def export_seating(event_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -1532,7 +1547,7 @@ def export_seating(event_id: int, db: Session = Depends(get_db), user: User = De
         ws.column_dimensions[col[0].column_letter].width = 20
     buf = _wb_to_bytes(wb)
     fn = f"seating_{safe_filename(event.name)}.xlsx"
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Length": str(buf.getbuffer().nbytes), "Content-Disposition": f'attachment; filename="{fn}"'})
 
 @app.get("/api/events/{event_id}/export/audit-log", tags=["Import/Export"])
 def export_audit_log(event_id: int, db: Session = Depends(get_db), user: User = Depends(current_user)):
@@ -1549,4 +1564,4 @@ def export_audit_log(event_id: int, db: Session = Depends(get_db), user: User = 
         ws.column_dimensions[col[0].column_letter].width = 20
     buf = _wb_to_bytes(wb)
     fn = f"audit_{safe_filename(event.name)}.xlsx"
-    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Disposition": f'attachment; filename="{fn}"'})
+    return StreamingResponse(buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", headers={"Content-Length": str(buf.getbuffer().nbytes), "Content-Disposition": f'attachment; filename="{fn}"'})
